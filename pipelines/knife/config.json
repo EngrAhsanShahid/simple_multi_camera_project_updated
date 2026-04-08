@@ -1,0 +1,7 @@
+{
+    "pipeline_id": "knife",
+    "model_path": "pipelines\\knife\\models\\best.pt",
+    "confidence_threshold": 0.3,
+    "max_detections": 50,
+    "device": "cpu"
+}

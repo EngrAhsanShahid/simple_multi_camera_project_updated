@@ -1,0 +1,10 @@
+{
+    "pipeline_id": "spiking",
+    "yolo_model_path": "pipelines/spiking/models/yolov8m.pt",
+    "hand_model_path": "pipelines/spiking/models/hand_landmarker.task",
+    "confidence_threshold": 0.4,
+    "alert_range_pixels": 200,
+    "img_size": 640,
+    "max_detections": 50,
+    "device": "cpu"
+}

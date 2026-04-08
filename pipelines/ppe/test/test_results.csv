@@ -1,0 +1,2 @@
+run_timestamp,input_video,video_duration_sec,video_fps,video_resolution,total_frames,total_detections,detections_per_class,violations_count,avg_confidence,processing_time_sec,avg_inference_ms,model_path,confidence_threshold,device,output_video
+2026-03-06T01:50:17,ppe_test.mp4,86.92,25.0,586x480,2173,4475,"{""Safety Cone"": 9, ""Person"": 1245, ""Safety Vest"": 1079, ""Vehicle"": 114, ""Machinery"": 222, ""Hardhat"": 1135, ""NO-Mask"": 654, ""NO-Safety Vest"": 17}",671,0.7447,320.17,144.08,pipelines/ppe/models/best.pt,0.5,cpu,ppe_test_output.mp4

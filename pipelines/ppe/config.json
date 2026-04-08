@@ -1,0 +1,7 @@
+{
+    "pipeline_id": "ppe",
+    "model_path": "pipelines/ppe/models/best.pt",
+    "confidence_threshold": 0.8,
+    "max_detections": 50,
+    "device": "cpu"
+}

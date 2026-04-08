@@ -1,0 +1,7 @@
+{
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python.analysis.extraPaths": [
+        "./shared/config",
+        "./apps/media_service"
+    ]
+}

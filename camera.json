@@ -1,0 +1,41 @@
+{
+  "cameras": [
+    {
+      "tenant_id": "tenant_01",
+      "camera_id": "cam_file_01",
+      "source_path": "ppe_test.mp4",
+      "loop": true,
+      "target_fps": 2.0,
+      "pipelines": [
+        "dummy",
+        "ppe",
+        "people_counter"
+      ],
+      "enabled": true
+    },
+    {
+      "tenant_id": "tenant_01",
+      "camera_id": "cam_file_02",
+      "source_path": "ppe_test.mp4",
+      "loop": true,
+      "target_fps": 3.0,
+      "pipelines": [
+        "dummy",
+        "ppe",
+        "people_counter"
+      ],
+      "enabled": true
+    },
+    {
+      "tenant_id": "tenant_01",
+      "camera_id": "cam_rtsp_01",
+      "source_path": "rtsp://username:password@ip:554/stream",
+      "loop": false,
+      "target_fps": 2.0,
+      "pipelines": [
+        "ppe"
+      ],
+      "enabled": false
+    }
+  ]
+}

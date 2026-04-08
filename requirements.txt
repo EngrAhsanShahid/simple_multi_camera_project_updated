@@ -1,0 +1,6 @@
+numpy
+opencv-python
+pydantic>=2
+pymongo
+python-dotenv
+ultralytics

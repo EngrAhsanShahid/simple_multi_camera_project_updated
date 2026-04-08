@@ -1,0 +1,8 @@
+{
+    "pipeline_id": "weapon",
+    "model_path": "pipelines\\weapon\\models\\best_weapon_v1.pt",
+    "confidence_threshold": 0.3,
+    "max_detections": 10,
+    "img_size": 640,
+    "device": "cpu"
+}
