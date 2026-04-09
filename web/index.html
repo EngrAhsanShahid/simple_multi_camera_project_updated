@@ -5,22 +5,32 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Nexa LiveKit Demo UI</title>
   <style>
-    body{font-family:Arial,Helvetica,sans-serif;margin:16px}
-    #controls{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+    body{font-family:Arial,Helvetica,sans-serif;margin:16px;background:#f4f5f7;color:#111}
+    h2{margin:0 0 12px}
+    .panel{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;padding:10px;border:1px solid #d8dbe1;border-radius:10px;background:#fff}
     #videos{display:flex;flex-wrap:wrap;gap:8px}
-    video{background:#000;border:1px solid #ccc;width:320px;height:240px}
-    input{padding:6px}
-    button{padding:6px 10px}
+    video{background:#000;border:1px solid #ccc;width:320px;height:240px;border-radius:8px}
+    input{padding:7px 8px;border:1px solid #c8ccd4;border-radius:8px;min-width:0}
+    button{padding:7px 12px;border:1px solid #111;background:#111;color:#fff;border-radius:8px;cursor:pointer}
+    button.secondary{background:#fff;color:#111;border-color:#c8ccd4}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    #status{margin:8px 0 12px;color:#333}
+    #evidenceUrl{margin-top:8px;word-break:break-all;font-size:14px;color:#444}
   </style>
 </head>
 <body>
   <h2>Nexa LiveKit Demo</h2>
-  <div id="controls">
+  <div class="panel" id="controls">
     <input id="serverUrl" placeholder="LiveKit server url" value="http://localhost:7880" size="24" />
     <input id="tenantId" placeholder="Room / tenant id" value="tenant_01" />
     <input id="viewerId" placeholder="Viewer id (optional)" />
     <button id="connectBtn">Connect</button>
     <button id="disconnectBtn" disabled>Disconnect</button>
+  </div>
+  <div class="panel" id="alertControls">
+    <input id="alertId" placeholder="Alert id" size="36" />
+    <button id="openEvidenceBtn" class="secondary">Open alert evidence</button>
+    <div id="evidenceUrl"></div>
   </div>
   <div id="status">Disconnected</div>
   <div id="trackPanel" style="margin:12px 0 8px; padding:8px; border:1px solid #ddd; background:#fafafa;">
@@ -29,7 +39,7 @@
     <div id="tracks" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
   </div>
   <hr />
-  <div id="videos" />
+  <div id="videos"></div>
 
   <script type="module" src="./app.js?v=2"></script>
 </body>

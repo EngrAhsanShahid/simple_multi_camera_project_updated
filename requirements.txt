@@ -7,3 +7,4 @@ ultralytics
 fastapi
 uvicorn[standard]
 livekit
+minio

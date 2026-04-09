@@ -8,6 +8,9 @@ const disconnectBtn = document.getElementById('disconnectBtn');
 const serverUrlInput = document.getElementById('serverUrl');
 const tenantIdInput = document.getElementById('tenantId');
 const viewerIdInput = document.getElementById('viewerId');
+const alertIdInput = document.getElementById('alertId');
+const openEvidenceBtn = document.getElementById('openEvidenceBtn');
+const evidenceUrlDiv = document.getElementById('evidenceUrl');
 const statusDiv = document.getElementById('status');
 const videosDiv = document.getElementById('videos');
 const tracksDiv = document.getElementById('tracks');
@@ -18,6 +21,10 @@ let activeTrackKey = null;
 const trackEntries = new Map();
 
 function setStatus(s) { statusDiv.textContent = s; }
+
+function setEvidenceText(text) {
+  evidenceUrlDiv.textContent = text || '';
+}
 
 function setActiveTrackLabel(label) {
   activeTrackDiv.textContent = label || 'None';
@@ -129,6 +136,49 @@ function detachParticipant(participantSid) {
   }
 }
 
+async function openAlertEvidence() {
+  const alertId = alertIdInput.value.trim();
+  if (!alertId) {
+    setStatus('Enter an alert id first');
+    return;
+  }
+
+  setStatus('Loading alert evidence...');
+  setEvidenceText('');
+
+  try {
+    const resp = await fetch(`/api/v1/alerts/${encodeURIComponent(alertId)}/evidence?expires_minutes=60`);
+    if (!resp.ok) {
+      throw new Error(`Evidence request failed: ${resp.status} ${resp.statusText}`);
+    }
+
+    const data = await resp.json();
+    const links = [];
+
+    if (data.snapshot_url) {
+      window.open(data.snapshot_url, '_blank', 'noopener,noreferrer');
+      links.push(`snapshot: ${data.snapshot_url}`);
+    }
+
+    if (data.clip_url) {
+      window.open(data.clip_url, '_blank', 'noopener,noreferrer');
+      links.push(`clip: ${data.clip_url}`);
+    }
+
+    if (links.length === 0) {
+      setStatus('Alert found, but no evidence URLs are stored');
+      setEvidenceText('No snapshot or clip URL available for this alert');
+      return;
+    }
+
+    setStatus(`Opened evidence for alert ${alertId}`);
+    setEvidenceText(links.join(' | '));
+  } catch (e) {
+    setStatus(`Evidence load failed: ${e.message}`);
+    setEvidenceText('');
+  }
+}
+
 function handleParticipant(participant) {
   // subscribe to existing subscribed tracks
   toParticipantList(participant.tracks).forEach(pub => {
@@ -202,3 +252,5 @@ disconnectBtn.addEventListener('click', () => {
     connectBtn.disabled = false;
   }
 });
+
+openEvidenceBtn.addEventListener('click', openAlertEvidence);

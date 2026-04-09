@@ -2,8 +2,12 @@ import argparse
 import asyncio
 import logging
 import os
+import re
+import tempfile
 import time
+from pathlib import Path
 
+import cv2
 from dotenv import load_dotenv
 from aggregator import FrameAggregator
 from alert_engine import AlertEngine
@@ -14,6 +18,7 @@ from pipeline_manager import PipelineManager
 from source_reader import SourceReader
 from logger import get_logger
 from shared.config.settings import AppSettings
+from shared.storage.minio_client import MinioSnapshotStore
 from apps.media_service.frame_buffer import frame_buffer
 
 try:
@@ -28,6 +33,101 @@ logger = get_logger("main")
 
 QUEUE_MAXSIZE = 10
 AGGREGATOR_TIMEOUT_MS = 500
+ALERT_SNAPSHOT_DIR = Path("alerts")
+ALERT_VIDEO_FPS = 5
+ALERT_VIDEO_SECONDS = 2
+
+
+def _safe_name(value: object) -> str:
+    text = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value))
+    return text.strip("_") or "item"
+
+
+def _annotate_alert_frame(frame, alert):
+    image = frame.copy()
+    bbox = (alert.details or {}).get("bbox")
+    if bbox and len(bbox) == 4:
+        x, y, w, h = [int(round(v)) for v in bbox]
+        x2 = max(0, x + max(0, w))
+        y2 = max(0, y + max(0, h))
+        x = max(0, x)
+        y = max(0, y)
+        cv2.rectangle(image, (x, y), (x2, y2), (0, 0, 255), 2)
+        cv2.putText(
+            image,
+            str(alert.alert_type),
+            (x, max(20, y - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+    return image
+
+
+def save_alert_snapshot(frame, alert, minio_store: MinioSnapshotStore) -> str | None:
+    try:
+        image = _annotate_alert_frame(frame, alert)
+        if minio_store is not None:
+            return minio_store.store_snapshot(
+                tenant_id=str(alert.tenant_id),
+                camera_id=str(alert.camera_id),
+                alert_id=str(alert.alert_id),
+                frame=image,
+            )
+
+        snapshot_dir = ALERT_SNAPSHOT_DIR / _safe_name(alert.tenant_id) / _safe_name(alert.camera_id)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        file_name = f"{int(alert.timestamp * 1000)}_{_safe_name(alert.alert_type)}_{_safe_name(alert.frame_id)}.jpg"
+        file_path = snapshot_dir / file_name
+        if cv2.imwrite(str(file_path), image):
+            return str(file_path)
+        logger.warning(f"Could not write alert snapshot: {file_path}")
+    except Exception as exc:
+        logger.error(f"Failed to save alert snapshot: {exc}")
+    return None
+
+
+def save_alert_clip(frame, alert, minio_store: MinioSnapshotStore) -> str | None:
+    try:
+        image = _annotate_alert_frame(frame, alert)
+        height, width = image.shape[:2]
+        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as temp_file:
+            temp_path = Path(temp_file.name)
+
+        writer = cv2.VideoWriter(str(temp_path), cv2.VideoWriter_fourcc(*"VP80"), ALERT_VIDEO_FPS, (width, height))
+        if not writer.isOpened():
+            logger.warning(f"Could not open video writer: {temp_path}")
+            temp_path.unlink(missing_ok=True)
+            return None
+
+        try:
+            total_frames = ALERT_VIDEO_FPS * ALERT_VIDEO_SECONDS
+            for _ in range(total_frames):
+                writer.write(image)
+        finally:
+            writer.release()
+
+        clip_bytes = temp_path.read_bytes()
+        temp_path.unlink(missing_ok=True)
+        if minio_store is not None:
+            return minio_store.store_clip(
+                tenant_id=str(alert.tenant_id),
+                camera_id=str(alert.camera_id),
+                alert_id=str(alert.alert_id),
+                clip_bytes=clip_bytes,
+            )
+
+        clip_dir = ALERT_SNAPSHOT_DIR / _safe_name(alert.tenant_id) / _safe_name(alert.camera_id)
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        file_name = f"{int(alert.timestamp * 1000)}_{_safe_name(alert.alert_type)}_{_safe_name(alert.frame_id)}.webm"
+        file_path = clip_dir / file_name
+        file_path.write_bytes(clip_bytes)
+        return str(file_path)
+    except Exception as exc:
+        logger.error(f"Failed to save alert clip: {exc}")
+    return None
 
 
 async def put_latest(queue: asyncio.Queue, item: FramePacket) -> None:
@@ -108,14 +208,18 @@ async def processor_task(
     pipeline_manager: PipelineManager,
     aggregator: FrameAggregator,
     alert_engine: AlertEngine,
+    minio_store: MinioSnapshotStore | None,
     mongo_store: MongoAlertStore,
 ) -> None:
     logger.info(f"Processor started: {camera.camera_id}")
+    frame_cache: dict[str, object] = {}
     while True:
         frame_packet = await queue.get()
         try:
             if frame_packet is None:
                 break
+
+            frame_cache[frame_packet.frame_id] = frame_packet.frame
 
             results = await pipeline_manager.run_pipelines(frame_packet)
 
@@ -123,21 +227,45 @@ async def processor_task(
                 frame_result = aggregator.add_result(result, expected_pipelines=frame_packet.pipeline_count)
                 if frame_result is not None:
                     alerts = alert_engine.build_alerts(frame_result)
+                    snapshot_path = None
+                    clip_path = None
                     for alert in alerts:
-                        alert_id = await asyncio.to_thread(mongo_store.insert_alert, alert.model_dump())
+                        if snapshot_path is None:
+                            snapshot_path = save_alert_snapshot(frame_packet.frame, alert, minio_store)
+                        if clip_path is None:
+                            clip_path = save_alert_clip(frame_packet.frame, alert, minio_store)
+                        alert_data = alert.model_dump()
+                        if snapshot_path is not None:
+                            alert_data["snapshot_path"] = snapshot_path
+                        if clip_path is not None:
+                            alert_data["clip_path"] = clip_path
+                        alert_id = await asyncio.to_thread(mongo_store.insert_alert, alert_data)
                         logger.info(
                             f"ALERT: camera={alert.camera_id} alert_type={alert.alert_type} "
-                            f"confidence={alert.confidence} alert_id={alert_id}"
+                            f"confidence={alert.confidence} alert_id={alert_id} snapshot={snapshot_path} clip={clip_path}"
                         )
+                    frame_cache.pop(frame_result.frame_id, None)
 
             timed_out_results = aggregator.check_timeouts()
             for frame_result in timed_out_results:
                 alerts = alert_engine.build_alerts(frame_result)
+                frame = frame_cache.pop(frame_result.frame_id, None)
+                snapshot_path = None
+                clip_path = None
                 for alert in alerts:
-                    alert_id = await asyncio.to_thread(mongo_store.insert_alert, alert.model_dump())
+                    if frame is not None and snapshot_path is None:
+                        snapshot_path = save_alert_snapshot(frame, alert, minio_store)
+                    if frame is not None and clip_path is None:
+                        clip_path = save_alert_clip(frame, alert, minio_store)
+                    alert_data = alert.model_dump()
+                    if snapshot_path is not None:
+                        alert_data["snapshot_path"] = snapshot_path
+                    if clip_path is not None:
+                        alert_data["clip_path"] = clip_path
+                    alert_id = await asyncio.to_thread(mongo_store.insert_alert, alert_data)
                     logger.info(
                         f"ALERT-TIMEOUT: camera={alert.camera_id} alert_type={alert.alert_type} "
-                        f"confidence={alert.confidence} alert_id={alert_id}"
+                        f"confidence={alert.confidence} alert_id={alert_id} snapshot={snapshot_path} clip={clip_path}"
                     )
         finally:
             queue.task_done()
@@ -176,6 +304,11 @@ async def main() -> None:
     aggregator = FrameAggregator(timeout_ms=AGGREGATOR_TIMEOUT_MS)
     alert_engine = AlertEngine()
     app_settings = AppSettings()
+    minio_store = None
+    try:
+        minio_store = MinioSnapshotStore(app_settings.minio)
+    except Exception as exc:
+        logger.warning(f"MinIO unavailable, using local alert storage fallback: {exc}")
     livekit_publisher = None
 
     if getattr(args, "enable_livekit", False) and LiveKitPublisher is not None:
@@ -194,7 +327,7 @@ async def main() -> None:
             queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
             tasks.append(asyncio.create_task(camera_reader_task(camera, queue), name=f"reader-{camera.camera_id}"))
             tasks.append(asyncio.create_task(
-                processor_task(camera, queue, pipeline_manager, aggregator, alert_engine, mongo_store),
+                processor_task(camera, queue, pipeline_manager, aggregator, alert_engine, minio_store, mongo_store),
                 name=f"processor-{camera.camera_id}",
             ))
 

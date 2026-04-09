@@ -243,7 +243,7 @@ class MongoAlertStore:
         Args:
             alert_id: The alert's unique identifier.
             snapshot_path: MinIO object path for the snapshot JPEG.
-            clip_path: MinIO object path for the video clip MP4.
+            clip_path: MinIO object path for the video clip WebM.
 
         Returns:
             True if the alert was found and updated.

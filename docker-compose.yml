@@ -1,5 +1,19 @@
 version: '3.8'
 services:
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    restart: unless-stopped
+
   livekit:
     image: livekit/livekit-server:latest
     container_name: livekit
@@ -11,3 +25,6 @@ services:
       - "7881:7881/tcp"
       - "7882:7882/udp"
     restart: unless-stopped
+
+volumes:
+  minio_data:

@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import requests
 
+from apps.api_service.routes.alerts import router as alerts_router
 from apps.api_service.routes.stream import router as stream_router
 
 
@@ -19,6 +20,7 @@ app.add_middleware(
 )
 
 app.include_router(stream_router)
+app.include_router(alerts_router)
 
 # Serve static UI from the `web/` folder at /ui
 app.mount("/ui", StaticFiles(directory="web", html=True), name="web_ui")
