@@ -57,13 +57,13 @@ class PipelineManager:
             self._instances[pipeline_name] = builder()
         return self._instances[pipeline_name]
 
-    def run_pipelines(self, frame_packet: FramePacket) -> list[PipelineResult]:
+    async def run_pipelines(self, frame_packet: FramePacket) -> list[PipelineResult]:
         results: list[PipelineResult] = []
         for pipeline_name in frame_packet.pipelines:
             pipeline = self.get_pipeline(pipeline_name)
             if pipeline is None:
                 print(f"[WARNING] pipeline not found: {pipeline_name}")
                 continue
-            result = pipeline.process(frame_packet)
+            result = await pipeline.process(frame_packet)
             results.append(result)
         return results

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Nexa LiveKit Demo UI</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;margin:16px}
+    #controls{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+    #videos{display:flex;flex-wrap:wrap;gap:8px}
+    video{background:#000;border:1px solid #ccc;width:320px;height:240px}
+    input{padding:6px}
+    button{padding:6px 10px}
+  </style>
+</head>
+<body>
+  <h2>Nexa LiveKit Demo</h2>
+  <div id="controls">
+    <input id="serverUrl" placeholder="LiveKit server url" value="http://localhost:7880" size="24" />
+    <input id="tenantId" placeholder="Room / tenant id" value="tenant_01" />
+    <input id="viewerId" placeholder="Viewer id (optional)" />
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn" disabled>Disconnect</button>
+  </div>
+  <div id="status">Disconnected</div>
+  <div id="trackPanel" style="margin:12px 0 8px; padding:8px; border:1px solid #ddd; background:#fafafa;">
+    <div style="margin-bottom:6px; font-weight:600;">Active camera tracks</div>
+    <div id="activeTrack" style="margin-bottom:6px; color:#555;">None</div>
+    <div id="tracks" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
+  </div>
+  <hr />
+  <div id="videos" />
+
+  <script type="module" src="./app.js?v=2"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: livekit
+    volumes:
+      - ./livekit_service/livekit.yaml:/config/livekit.yaml:ro
+    command: ["--config", "/config/livekit.yaml", "--dev", "--bind", "0.0.0.0"]
+    ports:
+      - "7880:7880/tcp"
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+    restart: unless-stopped

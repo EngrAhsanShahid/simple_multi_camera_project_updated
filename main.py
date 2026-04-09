@@ -13,6 +13,13 @@ from mongo_store import MongoAlertStore
 from pipeline_manager import PipelineManager
 from source_reader import SourceReader
 from logger import get_logger
+from shared.config.settings import AppSettings
+from apps.media_service.frame_buffer import frame_buffer
+
+try:
+    from livekit_service.livekit_publisher import LiveKitPublisher
+except Exception:
+    LiveKitPublisher = None
 
 load_dotenv()
 logger = get_logger()
@@ -82,6 +89,13 @@ async def camera_reader_task(camera: CameraConfig, queue: asyncio.Queue) -> None
                 frame=frame,
             )
             await put_latest(queue, packet)
+
+            # Also write latest frame to shared FrameBuffer so LiveKit publisher
+            # (if enabled) can pick it up and publish it as a track.
+            try:
+                frame_buffer.put(camera.camera_id, frame)
+            except Exception:
+                pass
             await asyncio.sleep(0)
     finally:
         await queue.put(None)
@@ -103,7 +117,7 @@ async def processor_task(
             if frame_packet is None:
                 break
 
-            results = await asyncio.to_thread(pipeline_manager.run_pipelines, frame_packet)
+            results = await pipeline_manager.run_pipelines(frame_packet)
 
             for result in results:
                 frame_result = aggregator.add_result(result, expected_pipelines=frame_packet.pipeline_count)
@@ -133,6 +147,7 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Run multi-camera processing")
     parser.add_argument("--tenant_id", required=True, help="Tenant ID")
     parser.add_argument("--camera_ids", nargs="+", required=True, help="List of camera IDs")
+    parser.add_argument("--enable_livekit", action="store_true", help="Enable publishing streams to LiveKit")
     args = parser.parse_args()
 
     mongo_store = MongoAlertStore()
@@ -160,6 +175,15 @@ async def main() -> None:
     pipeline_manager = PipelineManager()
     aggregator = FrameAggregator(timeout_ms=AGGREGATOR_TIMEOUT_MS)
     alert_engine = AlertEngine()
+    app_settings = AppSettings()
+    livekit_publisher = None
+
+    if getattr(args, "enable_livekit", False) and LiveKitPublisher is not None:
+        try:
+            livekit_publisher = LiveKitPublisher(app_settings.livekit)
+            await livekit_publisher.start(cameras)
+        except Exception as e:
+            logger.error(f"Failed to start LiveKit publisher: {e}")
 
     logger.info(f"Available pipelines: {pipeline_manager.available_pipelines()}")
     logger.info(f"Enabled cameras: {[camera.camera_id for camera in cameras]}")
@@ -176,6 +200,13 @@ async def main() -> None:
 
         await asyncio.gather(*tasks)
     finally:
+        # Stop LiveKit publisher if running
+        if livekit_publisher is not None:
+            try:
+                await livekit_publisher.stop()
+            except Exception:
+                pass
+
         mongo_store.close()
 
 

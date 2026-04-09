@@ -63,7 +63,7 @@ class LiveKitSettings(BaseModel):
     url: str = "ws://localhost:7880"
     public_url: str | None = None
     api_key: str = "devkey"
-    api_secret: str = "a]3Kf9#pLm2$wQz8vR5xN7bY0cJ4hT6e"
+    api_secret: str = "dummy-key-for-dev"
     publish_fps: int = 15
     publish_width: int = 640
     publish_height: int = 480
@@ -109,6 +109,9 @@ class AppSettings(BaseSettings):
     minio: MinioSettings = MinioSettings()
     api: ApiSettings = ApiSettings()
     livekit: LiveKitSettings = LiveKitSettings()
+    # Default token lifetime (seconds) for manual JWT fallback used in development
+    # Increase if tokens expire too quickly for the UI handshake (default 3600 = 1 hour)
+    livekit_token_ttl_sec: int = 3600
     auth: AuthSettings = AuthSettings()
     aggregation_timeout_ms: float = 500.0
     pipeline_queue_size: int = 10

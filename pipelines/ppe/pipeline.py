@@ -24,13 +24,16 @@ import json
 import time
 from pathlib import Path
 
-from ultralytics import YOLO
 
 from pipelines.base_pipeline import BasePipeline
 from shared.contracts.frame_packet import FramePacket
 from shared.contracts.pipeline_result import Detection, PipelineResult
 from shared.utils.logging import get_logger
 
+from redis_stream_sdk.client import RedisClient
+from redis_stream_sdk.producer import StreamProducer
+import msgpack
+import uuid
 # Violation class IDs — these labels indicate missing PPE
 VIOLATION_CLASS_IDS = {2, 3, 4}  # NO-Hardhat, NO-Mask, NO-Safety Vest
 
@@ -63,43 +66,39 @@ class PPEPipeline(BasePipeline):
     """
 
     def __init__(self, config: dict) -> None:
-        """Initialize the PPE pipeline and load the YOLO model.
-
-        Args:
-            config: Configuration dict with keys:
-                - pipeline_id: str (default "ppe")
-                - model_path: str (path to YOLO .pt file)
-                - confidence_threshold: float (default 0.5)
-                - max_detections: int (default 50)
-                - device: str (default "cpu")
-        """
         self._pipeline_id: str = config.get("pipeline_id", "ppe")
-        self._model_path: str = config.get("model_path", str(Path(__file__).parent / "models" / "best.pt"))
-        self._confidence_threshold: float = config.get("confidence_threshold", 0.5)
-        self._max_detections: int = config.get("max_detections", 50)
-        self._device: str = config.get("device", "cpu")
         self._logger = get_logger("ppe_pipeline", pipeline_id=self._pipeline_id)
 
-        # Load YOLO model
-        self._model = YOLO(self._model_path)
-        self._logger.info(
-            "pipeline_initialized",
-            model_path=self._model_path,
-            classes=self._model.names,
-            device=self._device,
-        )
+        self._logger.info("ppe pipeline_initialized")
+
+        # Redis config (no await here)
+        self._redis_url = config.get("redis_url", "redis://192.168.100.4:6379")
+
+        self.client: RedisClient | None = None
+        self.redis = None
+        self.producer: StreamProducer | None = None
+
+        self._initialized = False
+
+    async def setup(self) -> None:
+        """Async initialization for external services."""
+        if self._initialized:
+            return
+
+        self.client = RedisClient(url=self._redis_url)
+        self.redis = await self.client.get()
+
+        self.producer = StreamProducer(self.redis)
+
+        self._initialized = True
+        self._logger.info("redis_connected")
 
     @property
     def pipeline_id(self) -> str:
         """Pipeline identifier."""
         return self._pipeline_id
 
-    @property
-    def class_names(self) -> dict[int, str]:
-        """Model class name mapping."""
-        return self._model.names
-
-    def process(self, frame_packet: FramePacket) -> PipelineResult:
+    async def process(self, frame_packet: FramePacket) -> PipelineResult:
         """Run PPE detection on a single frame.
 
         Args:
@@ -108,43 +107,43 @@ class PPEPipeline(BasePipeline):
         Returns:
             PipelineResult with detections. Returns empty result on error.
         """
+        # ensure redis ready (safe for concurrent calls)
+        if not self._initialized:
+            await self.setup()
         start = time.monotonic()
 
         try:
-            # Run YOLO inference
-            results = self._model(
-                frame_packet.frame,
-                conf=self._confidence_threshold,
-                device=self._device,
-                verbose=False,
+            request_id = str(uuid.uuid4())
+            await self.producer.publish_frame(
+                stream_name="ppe",
+                request_id=request_id,
+                frame=frame_packet.frame,
+                maxlen=20000,
             )
+            results = await self.producer.get_results(request_id)
 
             # Extract detections from first result
             detections: list[Detection] = []
-            r = results[0]
-            boxes = r.boxes
+            boxes = results.get("boxes", [])
+            classes = results.get("classes", [])
+            confidences = results.get("confidence", [])
+            labels = results.get("labels", [])
 
             if boxes is not None and len(boxes) > 0:
-                for i, box in enumerate(boxes):
-                    if i >= self._max_detections:
-                        break
+                for box,class_id,confidence,label in zip(boxes, classes, confidences, labels):
 
                     # xyxy format -> [x, y, w, h]
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    w = x2 - x1
-                    h = y2 - y1
-
-                    class_id = int(box.cls[0].item())
-                    confidence = round(float(box.conf[0].item()), 4)
-                    label = self._model.names.get(class_id, f"class_{class_id}")
+                    x1, y1, x2, y2 = box
+                    w = int(x2 - x1)
+                    h = int(y2 - y1)
 
                     detections.append(
                         Detection(
                             label=label,
-                            bbox=[round(x1, 1), round(y1, 1), round(w, 1), round(h, 1)],
-                            confidence=confidence,
+                            bbox=[x1,y1,w,h],
+                            confidence=round(confidence,4),
                             metadata={
-                                "class_id": class_id,
+                                "class_id": class_id,   
                                 "is_violation": class_id in VIOLATION_CLASS_IDS,
                             },
                         )
