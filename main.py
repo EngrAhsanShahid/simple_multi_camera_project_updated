@@ -10,7 +10,6 @@ from pathlib import Path
 import cv2
 from dotenv import load_dotenv
 from aggregator import FrameAggregator
-from alert_engine import AlertEngine
 from shared.contracts import CameraConfig, FramePacket
 from frame_sampler import FrameSampler
 from mongo_store import MongoAlertStore
@@ -18,6 +17,8 @@ from pipeline_manager import PipelineManager
 from source_reader import SourceReader
 from logger import get_logger
 from shared.config.settings import AppSettings
+from shared.config.rule_loader import load_rules
+from apps.event_processor.rule_engine import RuleEngine
 from shared.storage.minio_client import MinioSnapshotStore
 from apps.media_service.frame_buffer import frame_buffer
 
@@ -207,7 +208,7 @@ async def processor_task(
     queue: asyncio.Queue,
     pipeline_manager: PipelineManager,
     aggregator: FrameAggregator,
-    alert_engine: AlertEngine,
+    rule_engine: RuleEngine,
     minio_store: MinioSnapshotStore | None,
     mongo_store: MongoAlertStore,
 ) -> None:
@@ -226,7 +227,7 @@ async def processor_task(
             for result in results:
                 frame_result = aggregator.add_result(result, expected_pipelines=frame_packet.pipeline_count)
                 if frame_result is not None:
-                    alerts = alert_engine.build_alerts(frame_result)
+                    alerts = rule_engine.process(frame_result)
                     snapshot_path = None
                     clip_path = None
                     for alert in alerts:
@@ -248,7 +249,7 @@ async def processor_task(
 
             timed_out_results = aggregator.check_timeouts()
             for frame_result in timed_out_results:
-                alerts = alert_engine.build_alerts(frame_result)
+                alerts = rule_engine.process(frame_result)
                 frame = frame_cache.pop(frame_result.frame_id, None)
                 snapshot_path = None
                 clip_path = None
@@ -302,7 +303,7 @@ async def main() -> None:
 
     pipeline_manager = PipelineManager()
     aggregator = FrameAggregator(timeout_ms=AGGREGATOR_TIMEOUT_MS)
-    alert_engine = AlertEngine()
+    default_engine, per_camera_engines = load_rules()
     app_settings = AppSettings()
     minio_store = None
     try:
@@ -326,8 +327,9 @@ async def main() -> None:
         for camera in cameras:
             queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
             tasks.append(asyncio.create_task(camera_reader_task(camera, queue), name=f"reader-{camera.camera_id}"))
+            rule_engine = per_camera_engines.get(camera.camera_id, default_engine)
             tasks.append(asyncio.create_task(
-                processor_task(camera, queue, pipeline_manager, aggregator, alert_engine, minio_store, mongo_store),
+                processor_task(camera, queue, pipeline_manager, aggregator, rule_engine, minio_store, mongo_store),
                 name=f"processor-{camera.camera_id}",
             ))
 

@@ -1,0 +1,29 @@
+{
+    "cooldown_sec": 30.0,
+    "rules": [
+        {
+            "type": "threshold",
+            "pipeline_id": "ppe",
+            "label": "NO-Hardhat",
+            "confidence_threshold": 0.8,
+            "alert_type": "ppe_violation",
+            "severity": "HIGH"
+        },
+        {
+            "type": "threshold",
+            "pipeline_id": "ppe",
+            "label": "NO-Mask",
+            "confidence_threshold": 0.8,
+            "alert_type": "ppe_violation",
+            "severity": "MEDIUM"
+        },
+        {
+            "type": "threshold",
+            "pipeline_id": "ppe",
+            "label": "NO-Safety Vest",
+            "confidence_threshold": 0.8,
+            "alert_type": "ppe_violation",
+            "severity": "HIGH"
+        }
+    ]
+}
