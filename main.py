@@ -19,6 +19,7 @@ from logger import get_logger
 from shared.config.settings import AppSettings
 from shared.config.rule_loader import load_rules
 from apps.event_processor.rule_engine import RuleEngine
+from shared.media.detection_overlay_store import DetectionOverlayStore
 from shared.storage.minio_client import MinioSnapshotStore
 from apps.media_service.frame_buffer import frame_buffer
 
@@ -131,6 +132,13 @@ def save_alert_clip(frame, alert, minio_store: MinioSnapshotStore) -> str | None
     return None
 
 
+def _collect_detections(frame_result) -> list:
+    detections = []
+    for pipeline_result in frame_result.results.values():
+        detections.extend(pipeline_result.detections)
+    return detections
+
+
 async def put_latest(queue: asyncio.Queue, item: FramePacket) -> None:
     if queue.full():
         try:
@@ -211,6 +219,7 @@ async def processor_task(
     rule_engine: RuleEngine,
     minio_store: MinioSnapshotStore | None,
     mongo_store: MongoAlertStore,
+    overlay_store: DetectionOverlayStore,
 ) -> None:
     logger.info(f"Processor started: {camera.camera_id}")
     frame_cache: dict[str, object] = {}
@@ -227,6 +236,7 @@ async def processor_task(
             for result in results:
                 frame_result = aggregator.add_result(result, expected_pipelines=frame_packet.pipeline_count)
                 if frame_result is not None:
+                    await overlay_store.put(frame_result.camera_id, _collect_detections(frame_result))
                     alerts = rule_engine.process(frame_result)
                     snapshot_path = None
                     clip_path = None
@@ -249,6 +259,7 @@ async def processor_task(
 
             timed_out_results = aggregator.check_timeouts()
             for frame_result in timed_out_results:
+                await overlay_store.put(frame_result.camera_id, _collect_detections(frame_result))
                 alerts = rule_engine.process(frame_result)
                 frame = frame_cache.pop(frame_result.frame_id, None)
                 snapshot_path = None
@@ -305,6 +316,7 @@ async def main() -> None:
     aggregator = FrameAggregator(timeout_ms=AGGREGATOR_TIMEOUT_MS)
     default_engine, per_camera_engines = load_rules()
     app_settings = AppSettings()
+    overlay_store = DetectionOverlayStore(app_settings.redis_url)
     minio_store = None
     try:
         minio_store = MinioSnapshotStore(app_settings.minio)
@@ -314,7 +326,7 @@ async def main() -> None:
 
     if getattr(args, "enable_livekit", False) and LiveKitPublisher is not None:
         try:
-            livekit_publisher = LiveKitPublisher(app_settings.livekit)
+            livekit_publisher = LiveKitPublisher(app_settings.livekit, overlay_store=overlay_store)
             await livekit_publisher.start(cameras)
         except Exception as e:
             logger.error(f"Failed to start LiveKit publisher: {e}")
@@ -329,7 +341,7 @@ async def main() -> None:
             tasks.append(asyncio.create_task(camera_reader_task(camera, queue), name=f"reader-{camera.camera_id}"))
             rule_engine = per_camera_engines.get(camera.camera_id, default_engine)
             tasks.append(asyncio.create_task(
-                processor_task(camera, queue, pipeline_manager, aggregator, rule_engine, minio_store, mongo_store),
+                processor_task(camera, queue, pipeline_manager, aggregator, rule_engine, minio_store, mongo_store, overlay_store),
                 name=f"processor-{camera.camera_id}",
             ))
 

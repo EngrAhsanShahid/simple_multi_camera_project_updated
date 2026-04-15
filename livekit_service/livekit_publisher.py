@@ -34,6 +34,7 @@ from apps.media_service.frame_buffer import FrameBuffer, frame_buffer
 from livekit_service.livekit_tokens import generate_publisher_token
 from shared.config.settings import LiveKitSettings
 from shared.contracts.camera_config import CameraConfig
+from shared.media.detection_overlay_store import DetectionOverlayStore, detection_overlay_store
 from shared.utils.logging import get_logger
 
 
@@ -50,9 +51,11 @@ class LiveKitPublisher:
         self,
         settings: LiveKitSettings,
         buffer: FrameBuffer | None = None,
+        overlay_store: DetectionOverlayStore | None = None,
     ) -> None:
         self._settings = settings
         self._buffer = buffer or frame_buffer
+        self._overlay_store = overlay_store or detection_overlay_store
         # tenant_id → {camera_id → Room}
         self._rooms: dict[str, dict[str, rtc.Room]] = defaultdict(dict)
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -159,10 +162,51 @@ class LiveKitPublisher:
             try:
                 bgr_frame = self._buffer.get(camera_id)
                 if bgr_frame is not None:
-                    if bgr_frame.shape[1] != width or bgr_frame.shape[0] != height:
-                        bgr_frame = cv2.resize(bgr_frame, (width, height))
+                    display_frame = bgr_frame
+                    if display_frame.shape[1] != width or display_frame.shape[0] != height:
+                        display_frame = cv2.resize(display_frame, (width, height))
 
-                    rgba_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGBA)
+                    display_frame = display_frame.copy()
+                    detections = await self._overlay_store.get_remote(camera_id)
+                    if detections:
+                        for detection in detections:
+                            if len(detection.bbox) != 4:
+                                continue
+
+                            x, y, w, h = [int(round(v)) for v in detection.bbox]
+                            x1 = max(0, x)
+                            y1 = max(0, y)
+                            x2 = max(x1 + 1, x1 + max(0, w))
+                            y2 = max(y1 + 1, y1 + max(0, h))
+                            label = f"{detection.label} {detection.confidence:.2f}"
+
+                            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                            (text_width, text_height), _ = cv2.getTextSize(
+                                label,
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                1,
+                            )
+                            text_top = max(18, y1 - text_height - 8)
+                            cv2.rectangle(
+                                display_frame,
+                                (x1, text_top),
+                                (x1 + text_width + 8, text_top + text_height + 8),
+                                (0, 0, 255),
+                                -1,
+                            )
+                            cv2.putText(
+                                display_frame,
+                                label,
+                                (x1 + 4, text_top + text_height + 2),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                (255, 255, 255),
+                                1,
+                                cv2.LINE_AA,
+                            )
+
+                    rgba_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGBA)
                     video_frame = rtc.VideoFrame(
                         width,
                         height,
