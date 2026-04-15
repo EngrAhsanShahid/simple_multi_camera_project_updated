@@ -20,6 +20,7 @@ Used By:
     - tests/test_ppe_pipeline.py
 """
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -73,6 +74,7 @@ class PPEPipeline(BasePipeline):
 
         # Redis config (no await here)
         self._redis_url = config.get("redis_url", "redis://192.168.100.4:6379")
+        self._result_timeout_sec = float(config.get("result_timeout_sec", 3.0))
 
         self.client: RedisClient | None = None
         self.redis = None
@@ -120,7 +122,18 @@ class PPEPipeline(BasePipeline):
                 frame=frame_packet.frame,
                 maxlen=20000,
             )
-            results = await self.producer.get_results(request_id)
+            try:
+                results = await asyncio.wait_for(
+                    self.producer.get_results(request_id),
+                    timeout=self._result_timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                self._logger.warning(
+                    "ppe_result_timeout",
+                    request_id=request_id,
+                    timeout_sec=self._result_timeout_sec,
+                )
+                results = {}
 
             # Extract detections from first result
             detections: list[Detection] = []

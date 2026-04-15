@@ -19,7 +19,6 @@ from logger import get_logger
 from shared.config.settings import AppSettings
 from shared.config.rule_loader import load_rules
 from apps.event_processor.rule_engine import RuleEngine
-from shared.media.detection_overlay_store import DetectionOverlayStore
 from shared.storage.minio_client import MinioSnapshotStore
 from apps.media_service.frame_buffer import frame_buffer
 
@@ -65,6 +64,90 @@ def _annotate_alert_frame(frame, alert):
             2,
             cv2.LINE_AA,
         )
+    return image
+
+
+def _annotate_processed_frame(frame, frame_result):
+    image = frame.copy()
+    for pipeline_id, pipeline_result in frame_result.results.items():
+        for detection in pipeline_result.detections:
+            if len(detection.bbox) != 4:
+                continue
+
+            x, y, w, h = [int(round(v)) for v in detection.bbox]
+            x2 = max(0, x + max(0, w))
+            y2 = max(0, y + max(0, h))
+            x = max(0, x)
+            y = max(0, y)
+
+            cv2.rectangle(image, (x, y), (x2, y2), (0, 255, 0), 2)
+            label = f"{pipeline_id}:{detection.label} {detection.confidence:.2f}"
+            cv2.putText(
+                image,
+                label,
+                (x, max(20, y - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+    status = "complete" if frame_result.is_complete else "partial"
+    overlay = f"{frame_result.camera_id} | {status} | pipelines {frame_result.received_pipelines}/{frame_result.expected_pipelines}"
+    overlay_width = min(760, 18 * len(overlay))
+    cv2.rectangle(image, (8, 8), (8 + overlay_width, 38), (0, 0, 0), -1)
+    cv2.putText(
+        image,
+        overlay,
+        (14, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return image
+
+
+def _annotate_pipeline_frame(frame, pipeline_result, pipeline_count: int):
+    image = frame.copy()
+    for detection in pipeline_result.detections:
+        if len(detection.bbox) != 4:
+            continue
+
+        x, y, w, h = [int(round(v)) for v in detection.bbox]
+        x2 = max(0, x + max(0, w))
+        y2 = max(0, y + max(0, h))
+        x = max(0, x)
+        y = max(0, y)
+
+        cv2.rectangle(image, (x, y), (x2, y2), (255, 165, 0), 2)
+        label = f"{pipeline_result.pipeline_id}:{detection.label} {detection.confidence:.2f}"
+        cv2.putText(
+            image,
+            label,
+            (x, max(20, y - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 165, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+    overlay = f"{pipeline_result.camera_id} | partial | pipelines 1/{pipeline_count}"
+    overlay_width = min(760, 18 * len(overlay))
+    cv2.rectangle(image, (8, 8), (8 + overlay_width, 38), (0, 0, 0), -1)
+    cv2.putText(
+        image,
+        overlay,
+        (14, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
     return image
 
 
@@ -132,13 +215,6 @@ def save_alert_clip(frame, alert, minio_store: MinioSnapshotStore) -> str | None
     return None
 
 
-def _collect_detections(frame_result) -> list:
-    detections = []
-    for pipeline_result in frame_result.results.values():
-        detections.extend(pipeline_result.detections)
-    return detections
-
-
 async def put_latest(queue: asyncio.Queue, item: FramePacket) -> None:
     if queue.full():
         try:
@@ -198,13 +274,6 @@ async def camera_reader_task(camera: CameraConfig, queue: asyncio.Queue) -> None
                 frame=frame,
             )
             await put_latest(queue, packet)
-
-            # Also write latest frame to shared FrameBuffer so LiveKit publisher
-            # (if enabled) can pick it up and publish it as a track.
-            try:
-                frame_buffer.put(camera.camera_id, frame)
-            except Exception:
-                pass
             await asyncio.sleep(0)
     finally:
         await queue.put(None)
@@ -219,7 +288,6 @@ async def processor_task(
     rule_engine: RuleEngine,
     minio_store: MinioSnapshotStore | None,
     mongo_store: MongoAlertStore,
-    overlay_store: DetectionOverlayStore,
 ) -> None:
     logger.info(f"Processor started: {camera.camera_id}")
     frame_cache: dict[str, object] = {}
@@ -234,17 +302,32 @@ async def processor_task(
             results = await pipeline_manager.run_pipelines(frame_packet)
 
             for result in results:
+                cached_frame = frame_cache.get(frame_packet.frame_id)
+                if cached_frame is not None:
+                    preview_frame = _annotate_pipeline_frame(cached_frame, result, frame_packet.pipeline_count)
+                    try:
+                        frame_buffer.put(camera.camera_id, preview_frame)
+                    except Exception:
+                        pass
+
                 frame_result = aggregator.add_result(result, expected_pipelines=frame_packet.pipeline_count)
                 if frame_result is not None:
-                    await overlay_store.put(frame_result.camera_id, _collect_detections(frame_result))
+                    cached_frame = frame_cache.get(frame_result.frame_id)
+                    if cached_frame is not None:
+                        processed_frame = _annotate_processed_frame(cached_frame, frame_result)
+                        try:
+                            frame_buffer.put(camera.camera_id, processed_frame)
+                        except Exception:
+                            pass
+
                     alerts = rule_engine.process(frame_result)
                     snapshot_path = None
                     clip_path = None
                     for alert in alerts:
-                        if snapshot_path is None:
-                            snapshot_path = save_alert_snapshot(frame_packet.frame, alert, minio_store)
-                        if clip_path is None:
-                            clip_path = save_alert_clip(frame_packet.frame, alert, minio_store)
+                        if snapshot_path is None and cached_frame is not None:
+                            snapshot_path = save_alert_snapshot(processed_frame, alert, minio_store)
+                        if clip_path is None and cached_frame is not None:
+                            clip_path = save_alert_clip(processed_frame, alert, minio_store)
                         alert_data = alert.model_dump()
                         if snapshot_path is not None:
                             alert_data["snapshot_path"] = snapshot_path
@@ -259,16 +342,22 @@ async def processor_task(
 
             timed_out_results = aggregator.check_timeouts()
             for frame_result in timed_out_results:
-                await overlay_store.put(frame_result.camera_id, _collect_detections(frame_result))
-                alerts = rule_engine.process(frame_result)
                 frame = frame_cache.pop(frame_result.frame_id, None)
+                if frame is not None:
+                    processed_frame = _annotate_processed_frame(frame, frame_result)
+                    try:
+                        frame_buffer.put(camera.camera_id, processed_frame)
+                    except Exception:
+                        pass
+
+                alerts = rule_engine.process(frame_result)
                 snapshot_path = None
                 clip_path = None
                 for alert in alerts:
                     if frame is not None and snapshot_path is None:
-                        snapshot_path = save_alert_snapshot(frame, alert, minio_store)
+                        snapshot_path = save_alert_snapshot(processed_frame, alert, minio_store)
                     if frame is not None and clip_path is None:
-                        clip_path = save_alert_clip(frame, alert, minio_store)
+                        clip_path = save_alert_clip(processed_frame, alert, minio_store)
                     alert_data = alert.model_dump()
                     if snapshot_path is not None:
                         alert_data["snapshot_path"] = snapshot_path
@@ -316,7 +405,6 @@ async def main() -> None:
     aggregator = FrameAggregator(timeout_ms=AGGREGATOR_TIMEOUT_MS)
     default_engine, per_camera_engines = load_rules()
     app_settings = AppSettings()
-    overlay_store = DetectionOverlayStore(app_settings.redis_url)
     minio_store = None
     try:
         minio_store = MinioSnapshotStore(app_settings.minio)
@@ -326,7 +414,7 @@ async def main() -> None:
 
     if getattr(args, "enable_livekit", False) and LiveKitPublisher is not None:
         try:
-            livekit_publisher = LiveKitPublisher(app_settings.livekit, overlay_store=overlay_store)
+            livekit_publisher = LiveKitPublisher(app_settings.livekit)
             await livekit_publisher.start(cameras)
         except Exception as e:
             logger.error(f"Failed to start LiveKit publisher: {e}")
@@ -341,7 +429,7 @@ async def main() -> None:
             tasks.append(asyncio.create_task(camera_reader_task(camera, queue), name=f"reader-{camera.camera_id}"))
             rule_engine = per_camera_engines.get(camera.camera_id, default_engine)
             tasks.append(asyncio.create_task(
-                processor_task(camera, queue, pipeline_manager, aggregator, rule_engine, minio_store, mongo_store, overlay_store),
+                processor_task(camera, queue, pipeline_manager, aggregator, rule_engine, minio_store, mongo_store),
                 name=f"processor-{camera.camera_id}",
             ))
 

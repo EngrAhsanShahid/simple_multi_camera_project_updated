@@ -107,7 +107,6 @@ class AppSettings(BaseSettings):
 
     mongo: MongoSettings = MongoSettings()
     minio: MinioSettings = MinioSettings()
-    redis_url: str = "redis://localhost:6379"
     api: ApiSettings = ApiSettings()
     livekit: LiveKitSettings = LiveKitSettings()
     # Default token lifetime (seconds) for manual JWT fallback used in development
