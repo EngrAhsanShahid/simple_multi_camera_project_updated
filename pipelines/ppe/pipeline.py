@@ -73,7 +73,7 @@ class PPEPipeline(BasePipeline):
         self._logger.info("ppe pipeline_initialized")
 
         # Redis config (no await here)
-        self._redis_url = config.get("redis_url", "redis://192.168.100.4:6379")
+        self._redis_url = config.get("redis_url", "redis://192.168.100.77:6379")
         self._result_timeout_sec = float(config.get("result_timeout_sec", 3.0))
 
         self.client: RedisClient | None = None
@@ -94,6 +94,18 @@ class PPEPipeline(BasePipeline):
 
         self._initialized = True
         self._logger.info("redis_connected")
+
+    async def close(self) -> None:
+        """Release Redis resources owned by this pipeline."""
+        if self.client is not None:
+            try:
+                await self.client.close()
+            except Exception:
+                pass
+        self.client = None
+        self.redis = None
+        self.producer = None
+        self._initialized = False
 
     @property
     def pipeline_id(self) -> str:

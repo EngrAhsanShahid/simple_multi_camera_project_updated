@@ -37,13 +37,24 @@ class StreamProducer:
     
     async def get_results(self, request_id):
         pubsub = self.redis.pubsub()
-        await pubsub.subscribe(request_id)
-        async for message in pubsub.listen():
+        try:
+            await pubsub.subscribe(request_id)
+            async for message in pubsub.listen():
 
-            # skip internal subscribe confirmation messages
-            if message["type"] != "message":
-                continue
+                # skip internal subscribe confirmation messages
+                if message["type"] != "message":
+                    continue
 
-            payload = msgpack.unpackb(message["data"], raw=False)
-            break
-        return payload
+                payload = msgpack.unpackb(message["data"], raw=False)
+                return payload
+        finally:
+            try:
+                await pubsub.unsubscribe(request_id)
+            except Exception:
+                pass
+            try:
+                await pubsub.close()
+            except Exception:
+                pass
+
+        return {}

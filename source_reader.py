@@ -3,7 +3,7 @@ import logging
 import cv2
 import numpy as np
 
-from shared.contracts import CameraConfig
+from shared.contracts import CameraConfig, SourceType
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +21,11 @@ class SourceReader:
 
     @property
     def source_uri(self) -> str:
-        # Handle both old (source_path) and new (rtsp_url/file_path) schemas
-        if hasattr(self.config, 'source_path') and self.config.source_path:
+        if self.config.source_path:
             return self.config.source_path
-        elif self.config.source_type == "rtsp":
-            return self.config.rtsp_url
-        else:
-            return self.config.file_path
+        if self.config.source_type == SourceType.RTSP:
+            return self.config.rtsp_url or ""
+        return self.config.file_path or ""
 
     def open(self) -> bool:
         """Open the video source with better RTSP handling"""

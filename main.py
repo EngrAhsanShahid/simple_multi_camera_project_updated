@@ -381,19 +381,6 @@ async def main() -> None:
 
     mongo_store = MongoAlertStore()
     camera_data = mongo_store.get_cameras_by_ids([(args.tenant_id, cid) for cid in args.camera_ids])
-    
-    # Convert old source_path from mongo to new schema before validation
-    # In your main() function, update the conversion logic:
-    for cam in camera_data:
-        if "source_path" in cam:
-            source_path = cam["source_path"]
-            if source_path.startswith("rtsp://"):
-                cam["source_type"] = "rtsp"
-                cam["rtsp_url"] = source_path  # Keep for compatibility
-                # Keep source_path for backward compatibility
-            else:
-                cam["source_type"] = "file"
-                cam["file_path"] = source_path
 
     cameras = [CameraConfig.model_validate(cam) for cam in camera_data]
 
@@ -441,6 +428,11 @@ async def main() -> None:
                 await livekit_publisher.stop()
             except Exception:
                 pass
+
+        try:
+            await pipeline_manager.close()
+        except Exception:
+            pass
 
         mongo_store.close()
 

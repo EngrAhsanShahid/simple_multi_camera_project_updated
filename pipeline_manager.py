@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -67,3 +68,14 @@ class PipelineManager:
             result = await pipeline.process(frame_packet)
             results.append(result)
         return results
+
+    async def close(self) -> None:
+        for pipeline in self._instances.values():
+            close = getattr(pipeline, "close", None)
+            if callable(close):
+                try:
+                    maybe_result = close()
+                    if asyncio.iscoroutine(maybe_result):
+                        await maybe_result
+                except Exception:
+                    pass

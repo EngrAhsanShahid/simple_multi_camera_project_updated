@@ -39,7 +39,8 @@ class CameraConfig(BaseModel):
 
     tenant_id: str
     camera_id: str
-    source_type: SourceType
+    source_path: str | None = None
+    source_type: SourceType | None = None
     rtsp_url: str | None = None
     file_path: str | None = None
     loop: bool = False
@@ -51,6 +52,17 @@ class CameraConfig(BaseModel):
     @model_validator(mode="after")
     def validate_source(self) -> "CameraConfig":
         """Ensure the correct URL/path is provided for the source type."""
+        if self.source_path:
+            if self.source_path.startswith("rtsp://"):
+                self.source_type = SourceType.RTSP
+                self.rtsp_url = self.source_path
+            else:
+                self.source_type = SourceType.FILE
+                self.file_path = self.source_path
+
+        if self.source_type is None:
+            raise ValueError("source_type is required")
+
         if self.source_type == SourceType.RTSP and not self.rtsp_url:
             raise ValueError("rtsp_url is required when source_type is 'rtsp'")
         if self.source_type == SourceType.FILE and not self.file_path:

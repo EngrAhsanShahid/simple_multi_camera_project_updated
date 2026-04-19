@@ -10,4 +10,8 @@ class RedisClient:
         return self._redis
 
     async def close(self):
+        close = getattr(self._redis, "aclose", None)
+        if callable(close):
+            await close()
+            return
         await self._redis.close()
