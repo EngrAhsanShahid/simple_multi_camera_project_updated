@@ -72,8 +72,11 @@ class PPEPipeline(BasePipeline):
 
         self._logger.info("ppe pipeline_initialized")
 
-        # Redis config (no await here)
-        self._redis_url = config.get("redis_url", "redis://192.168.100.77:6379")
+        # Redis URL is injected by PipelineManager from AppSettings.redis.url
+        # (which itself reads from REDIS__URL in .env). The localhost fallback
+        # exists only for direct/test instantiation — production must configure
+        # this via .env.
+        self._redis_url = config.get("redis_url", "redis://localhost:6379")
         self._result_timeout_sec = float(config.get("result_timeout_sec", 3.0))
 
         self.client: RedisClient | None = None

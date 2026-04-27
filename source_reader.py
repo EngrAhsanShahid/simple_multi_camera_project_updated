@@ -1,11 +1,12 @@
 import time
-import logging
+
 import cv2
 import numpy as np
 
 from shared.contracts import CameraConfig, SourceType
+from shared.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("source_reader")
 
 class SourceReader:
     RECONNECT_DELAY_SEC = 3.0

@@ -46,6 +46,7 @@ class StreamProducer:
                     continue
 
                 payload = msgpack.unpackb(message["data"], raw=False)
+                print(f"Received message on pubsub channel {request_id}: {payload}")
                 return payload
         finally:
             try:
