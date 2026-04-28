@@ -20,7 +20,7 @@ Used By:
     - apps/api_service/routes/stream.py
 """
 
-from shared.config.settings import AppSettings, LiveKitSettings
+from shared.config.settings import LiveKitSettings
 import time
 import uuid
 import jwt
@@ -81,8 +81,15 @@ def generate_publisher_token(
         Signed JWT string for the publisher participant.
     """
     identity = _short_identity(f"nexa_pub_{tenant_id}", camera_id)
-    ttl = AppSettings().livekit_token_ttl_sec
-    return _manual_token(settings.api_key, settings.api_secret, identity, tenant_id, True, True, ttl)
+    return _manual_token(
+        settings.api_key,
+        settings.api_secret,
+        identity,
+        tenant_id,
+        True,
+        True,
+        settings.token_ttl_sec,
+    )
 
 
 def generate_subscriber_token(
@@ -101,5 +108,12 @@ def generate_subscriber_token(
         Signed JWT string for the subscriber participant.
     """
     identity = _short_identity(f"{tenant_id}_viewer", viewer_id)
-    ttl = AppSettings().livekit_token_ttl_sec
-    return _manual_token(settings.api_key, settings.api_secret, identity, tenant_id, False, True, ttl)
+    return _manual_token(
+        settings.api_key,
+        settings.api_secret,
+        identity,
+        tenant_id,
+        False,
+        True,
+        settings.token_ttl_sec,
+    )

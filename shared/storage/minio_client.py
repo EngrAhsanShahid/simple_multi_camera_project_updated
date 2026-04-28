@@ -123,7 +123,7 @@ class MinioSnapshotStore:
             object_path=object_path,
             size_bytes=len(jpeg_bytes),
         )
-        return object_path
+        return f"{self._bucket}/{object_path}"
 
     def get_snapshot_url(
         self,
@@ -181,7 +181,7 @@ class MinioSnapshotStore:
             object_path=object_path,
             size_bytes=len(clip_bytes),
         )
-        return object_path
+        return f"{self._bucket}/{object_path}"
 
     def get_clip_url(
         self,

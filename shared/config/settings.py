@@ -46,6 +46,12 @@ class MinioSettings(BaseModel):
     bucket: str = "nexa-evidence"
 
 
+class RedisSettings(BaseModel):
+    """Redis connection configuration (used by external inference workers)."""
+
+    url: str = "redis://localhost:6379"
+
+
 class ApiSettings(BaseModel):
     """API server configuration."""
 
@@ -67,6 +73,8 @@ class LiveKitSettings(BaseModel):
     publish_fps: int = 15
     publish_width: int = 640
     publish_height: int = 480
+    # Token lifetime (seconds) for publisher/subscriber JWTs.
+    token_ttl_sec: int = 3600
 
 
 class AuthSettings(BaseModel):
@@ -98,20 +106,19 @@ class AppSettings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     cors_allowed_origins: list[str] = ["*"]
 
-    # Alert evidence settings
-    alert_clip_enabled: bool = False
-    alert_clip_pre_sec: float = 5.0
-    alert_clip_post_sec: float = 5.0
-    alert_clip_fps: float = 5.0
+    # Alert evidence settings (single source of truth — read by main.py at startup)
+    alert_clip_enabled: bool = True
     alert_snapshot_enabled: bool = True
+    alert_snapshot_dir: str = "alerts"
+    alert_clip_fps: int = 5
+    alert_frames_before: int = 15
+    alert_frames_after: int = 15
 
     mongo: MongoSettings = MongoSettings()
     minio: MinioSettings = MinioSettings()
+    redis: RedisSettings = RedisSettings()
     api: ApiSettings = ApiSettings()
     livekit: LiveKitSettings = LiveKitSettings()
-    # Default token lifetime (seconds) for manual JWT fallback used in development
-    # Increase if tokens expire too quickly for the UI handshake (default 3600 = 1 hour)
-    livekit_token_ttl_sec: int = 3600
     auth: AuthSettings = AuthSettings()
     aggregation_timeout_ms: float = 500.0
     pipeline_queue_size: int = 10

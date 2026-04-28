@@ -44,7 +44,7 @@ class BasePipeline(ABC):
         """
 
     @abstractmethod
-    def process(self, frame_packet: FramePacket) -> PipelineResult:
+    async def process(self, frame_packet: FramePacket) -> PipelineResult:
         """Process a single frame and return detections.
 
         Args:
@@ -53,4 +53,9 @@ class BasePipeline(ABC):
         Returns:
             PipelineResult with detections. Must never raise — return
             an empty PipelineResult on failure.
+
+        Contract:
+            Pipelines MUST be awaitable. CPU-bound work should be offloaded
+            via asyncio.to_thread or delegated to an external worker (see
+            pipelines/ppe for the reference implementation using Redis).
         """

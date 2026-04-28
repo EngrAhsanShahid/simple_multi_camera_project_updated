@@ -3,5 +3,6 @@
     "model_path": "pipelines/ppe/models/best.pt",
     "confidence_threshold": 0.5,
     "max_detections": 50,
-    "device": "cpu"
+    "device": "cuda",
+    "result_timeout_sec": 0.900
 }

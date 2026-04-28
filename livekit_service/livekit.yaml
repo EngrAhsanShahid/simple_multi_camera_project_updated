@@ -13,4 +13,4 @@ rtc:
   udp_port: 7882
   use_external_ip: false
 logging:
-  level: debug
+  level: info

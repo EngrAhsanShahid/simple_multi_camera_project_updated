@@ -1,0 +1,28 @@
+*.pyc
+__pycache__/
+
+# Environment and Secrets
+.env
+.env.*
+
+# Generated Output
+alerts/
+*.log
+
+# Environments
+venv/
+.venv/
+env/
+.env/
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+
+*.pt
+*.pth
+*.ckpt
+*.jpeg
+*.png
+*.jpg

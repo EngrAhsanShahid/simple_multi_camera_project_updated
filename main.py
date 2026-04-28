@@ -1,21 +1,24 @@
 import argparse
 import asyncio
-import logging
+import collections
 import os
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 import cv2
 from dotenv import load_dotenv
+from pydantic import ValidationError
+
 from aggregator import FrameAggregator
 from shared.contracts import CameraConfig, FramePacket
 from frame_sampler import FrameSampler
 from mongo_store import MongoAlertStore
 from pipeline_manager import PipelineManager
 from source_reader import SourceReader
-from logger import get_logger
+from shared.utils.logging import get_logger
 from shared.config.settings import AppSettings
 from shared.config.rule_loader import load_rules
 from apps.event_processor.rule_engine import RuleEngine
@@ -28,15 +31,31 @@ except Exception:
     LiveKitPublisher = None
 
 load_dotenv()
-logger = get_logger()
 logger = get_logger("main")
 
+# Single source of truth for env-backed configuration.
+_settings = AppSettings()
 
-QUEUE_MAXSIZE = 10
-AGGREGATOR_TIMEOUT_MS = 500
-ALERT_SNAPSHOT_DIR = Path("alerts")
-ALERT_VIDEO_FPS = 5
-ALERT_VIDEO_SECONDS = 2
+QUEUE_MAXSIZE = _settings.pipeline_queue_size
+AGGREGATOR_TIMEOUT_MS = int(_settings.aggregation_timeout_ms)
+ALERT_VIDEO_FPS = int(_settings.alert_clip_fps)
+ALERT_FRAMES_BEFORE = _settings.alert_frames_before
+ALERT_FRAMES_AFTER = _settings.alert_frames_after
+
+# Global in-memory ring buffer to hold past frames per camera.
+# Sized to cover the pre/post window needed for alert clips.
+camera_ring_buffers: dict[str, collections.deque] = collections.defaultdict(
+    lambda: collections.deque(maxlen=ALERT_FRAMES_BEFORE + ALERT_FRAMES_AFTER + 1)
+)
+
+logger.info(
+    "configuration_loaded",
+    queue_maxsize=QUEUE_MAXSIZE,
+    aggregator_timeout_ms=AGGREGATOR_TIMEOUT_MS,
+    alert_video_fps=ALERT_VIDEO_FPS,
+    alert_frames_before=ALERT_FRAMES_BEFORE,
+    alert_frames_after=ALERT_FRAMES_AFTER,
+)
 
 
 def _safe_name(value: object) -> str:
@@ -154,21 +173,12 @@ def _annotate_pipeline_frame(frame, pipeline_result, pipeline_count: int):
 def save_alert_snapshot(frame, alert, minio_store: MinioSnapshotStore) -> str | None:
     try:
         image = _annotate_alert_frame(frame, alert)
-        if minio_store is not None:
-            return minio_store.store_snapshot(
-                tenant_id=str(alert.tenant_id),
-                camera_id=str(alert.camera_id),
-                alert_id=str(alert.alert_id),
-                frame=image,
-            )
-
-        snapshot_dir = ALERT_SNAPSHOT_DIR / _safe_name(alert.tenant_id) / _safe_name(alert.camera_id)
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
-        file_name = f"{int(alert.timestamp * 1000)}_{_safe_name(alert.alert_type)}_{_safe_name(alert.frame_id)}.jpg"
-        file_path = snapshot_dir / file_name
-        if cv2.imwrite(str(file_path), image):
-            return str(file_path)
-        logger.warning(f"Could not write alert snapshot: {file_path}")
+        return minio_store.store_snapshot(
+            tenant_id=str(alert.tenant_id),
+            camera_id=str(alert.camera_id),
+            alert_id=str(alert.alert_id),
+            frame=image,
+        )
     except Exception as exc:
         logger.error(f"Failed to save alert snapshot: {exc}")
     return None
@@ -176,44 +186,55 @@ def save_alert_snapshot(frame, alert, minio_store: MinioSnapshotStore) -> str | 
 
 def save_alert_clip(frame, alert, minio_store: MinioSnapshotStore) -> str | None:
     try:
-        image = _annotate_alert_frame(frame, alert)
-        height, width = image.shape[:2]
-        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as temp_file:
-            temp_path = Path(temp_file.name)
-
-        writer = cv2.VideoWriter(str(temp_path), cv2.VideoWriter_fourcc(*"VP80"), ALERT_VIDEO_FPS, (width, height))
-        if not writer.isOpened():
-            logger.warning(f"Could not open video writer: {temp_path}")
-            temp_path.unlink(missing_ok=True)
+        if not camera_ring_buffers.get(alert.camera_id):
             return None
 
-        try:
-            total_frames = ALERT_VIDEO_FPS * ALERT_VIDEO_SECONDS
-            for _ in range(total_frames):
-                writer.write(image)
-        finally:
-            writer.release()
+        fd, temp_name = tempfile.mkstemp(suffix=".webm")
+        os.close(fd)
+        temp_path = Path(temp_name)
+####
+        expected_path = f"{minio_store._bucket}/{alert.tenant_id}/{alert.camera_id}/alerts/{alert.alert_id}/clip.webm"
 
-        clip_bytes = temp_path.read_bytes()
-        temp_path.unlink(missing_ok=True)
-        if minio_store is not None:
-            return minio_store.store_clip(
-                tenant_id=str(alert.tenant_id),
-                camera_id=str(alert.camera_id),
-                alert_id=str(alert.alert_id),
-                clip_bytes=clip_bytes,
-            )
+        def _write_clip_thread(temp_path_str):
+            try:
+                # Wait natively for 'after' frames to accumulate in the ring buffer
+                time.sleep(ALERT_FRAMES_AFTER / max(1, ALERT_VIDEO_FPS))
 
-        clip_dir = ALERT_SNAPSHOT_DIR / _safe_name(alert.tenant_id) / _safe_name(alert.camera_id)
-        clip_dir.mkdir(parents=True, exist_ok=True)
-        file_name = f"{int(alert.timestamp * 1000)}_{_safe_name(alert.alert_type)}_{_safe_name(alert.frame_id)}.webm"
-        file_path = clip_dir / file_name
-        file_path.write_bytes(clip_bytes)
-        return str(file_path)
+                ring_buffer = camera_ring_buffers.get(alert.camera_id)
+                if not ring_buffer:
+                    return
+                frames = [f for ts, f in ring_buffer]
+                if not frames:
+                    return
+
+                height, width = frames[0].shape[:2]
+                writer = cv2.VideoWriter(temp_path_str, cv2.VideoWriter_fourcc(*"VP80"), ALERT_VIDEO_FPS, (width, height))
+                if writer.isOpened():
+                    for f in frames:
+                        writer.write(f)
+                    writer.release()
+                
+                clip_bytes = Path(temp_path_str).read_bytes()
+                Path(temp_path_str).unlink(missing_ok=True)
+                
+                minio_store.store_clip(
+                    tenant_id=str(alert.tenant_id),
+                    camera_id=str(alert.camera_id),
+                    alert_id=str(alert.alert_id),
+                    clip_bytes=clip_bytes,
+                )
+            except Exception as exc:
+                logger.error(f"Failed to process video clip in thread: {exc}")
+
+        t = threading.Thread(target=_write_clip_thread, args=(
+            str(temp_path),
+        ), daemon=True)
+        t.start()
+        
+        return expected_path
     except Exception as exc:
-        logger.error(f"Failed to save alert clip: {exc}")
+        logger.error(f"Failed to initialize alert clip thread: {exc}")
     return None
-
 
 async def put_latest(queue: asyncio.Queue, item: FramePacket) -> None:
     if queue.full():
@@ -228,10 +249,6 @@ async def put_latest(queue: asyncio.Queue, item: FramePacket) -> None:
 async def camera_reader_task(camera: CameraConfig, queue: asyncio.Queue) -> None:
     reader = SourceReader(camera)
     sampler = FrameSampler(camera.target_fps)
-    
-    ###
-    # frames_processed = 0
-    ###
 
     if not await asyncio.to_thread(reader.open):
         logger.error(f"Could not open camera: {camera.camera_id}")
@@ -250,24 +267,18 @@ async def camera_reader_task(camera: CameraConfig, queue: asyncio.Queue) -> None
                     continue
                 logger.info(f"Camera ended: {camera.camera_id}")
                 break
+            
+            ts = time.time()
+            camera_ring_buffers[camera.camera_id].append((ts, frame.copy()))
 
             if not sampler.should_sample():
                 await asyncio.sleep(0)
                 continue
-            
-
-            ############################
-            # frames_processed += 1
-            # if frames_processed > 50:  # Temporary benchmark limit
-            #     logger.info(f"Reached benchmark limit of 50 frames: {camera.camera_id}")
-            #     break
-            ##############################
-
 
             packet = FramePacket(
                 tenant_id=camera.tenant_id,
                 camera_id=camera.camera_id,
-                timestamp=time.time(),
+                timestamp=ts, # use precise timestamp logged in circular buffer
                 width=int(frame.shape[1]),
                 height=int(frame.shape[0]),
                 pipelines=camera.pipelines,
@@ -280,6 +291,39 @@ async def camera_reader_task(camera: CameraConfig, queue: asyncio.Queue) -> None
         await asyncio.to_thread(reader.release)
 
 
+async def _process_and_save_alerts(frame_result, frame, minio_store, mongo_store, rule_engine, is_timeout=False):
+    if frame is None:
+        return
+        
+    processed_frame = _annotate_processed_frame(frame, frame_result)
+    try:
+        frame_buffer.put(frame_result.camera_id, processed_frame)
+    except Exception as exc:
+        logger.debug(f"frame_buffer.put failed for {frame_result.camera_id}: {exc}")
+
+    alerts = rule_engine.process(frame_result)
+    # Clip is frame-level (shared across all alerts from the same frame);
+    # snapshot is per-alert so each alert's bbox is highlighted on its own image.
+    clip_path = None
+    for alert in alerts:
+        snapshot_path = save_alert_snapshot(processed_frame, alert, minio_store)
+        if clip_path is None:
+            clip_path = save_alert_clip(processed_frame, alert, minio_store)
+
+        alert_data = alert.model_dump()
+        if snapshot_path is not None:
+            alert_data["snapshot_path"] = snapshot_path
+        if clip_path is not None:
+            alert_data["clip_path"] = clip_path
+
+        alert_id = await asyncio.to_thread(mongo_store.insert_alert, alert_data)
+        prefix = "ALERT-TIMEOUT" if is_timeout else "ALERT"
+        logger.info(
+            f"{prefix}: camera={alert.camera_id} alert_type={alert.alert_type} "
+            f"confidence={alert.confidence} alert_id={alert_id} snapshot={snapshot_path} clip={clip_path}"
+        )
+
+
 async def processor_task(
     camera: CameraConfig,
     queue: asyncio.Queue,
@@ -290,84 +334,50 @@ async def processor_task(
     mongo_store: MongoAlertStore,
 ) -> None:
     logger.info(f"Processor started: {camera.camera_id}")
-    frame_cache: dict[str, object] = {}
     while True:
         frame_packet = await queue.get()
         try:
             if frame_packet is None:
                 break
 
-            frame_cache[frame_packet.frame_id] = frame_packet.frame
+            try:
+                results = await pipeline_manager.run_pipelines(frame_packet)
+            except Exception as e:
+                logger.error(f"Pipeline error for frame {frame_packet.frame_id}: {e}")
+                continue
 
-            results = await pipeline_manager.run_pipelines(frame_packet)
-
+            cached_frame = frame_packet.frame
             for result in results:
-                cached_frame = frame_cache.get(frame_packet.frame_id)
-                if cached_frame is not None:
-                    preview_frame = _annotate_pipeline_frame(cached_frame, result, frame_packet.pipeline_count)
-                    try:
-                        frame_buffer.put(camera.camera_id, preview_frame)
-                    except Exception:
-                        pass
+                preview_frame = _annotate_pipeline_frame(cached_frame, result, frame_packet.pipeline_count)
+                try:
+                    frame_buffer.put(camera.camera_id, preview_frame)
+                except Exception as exc:
+                    logger.debug(f"frame_buffer.put failed for {camera.camera_id}: {exc}")
 
                 frame_result = aggregator.add_result(result, expected_pipelines=frame_packet.pipeline_count)
                 if frame_result is not None:
-                    cached_frame = frame_cache.get(frame_result.frame_id)
-                    if cached_frame is not None:
-                        processed_frame = _annotate_processed_frame(cached_frame, frame_result)
-                        try:
-                            frame_buffer.put(camera.camera_id, processed_frame)
-                        except Exception:
-                            pass
+                    alert_frame = None
+                    ring = camera_ring_buffers.get(frame_result.camera_id)
+                    if ring:
+                        for ts, f in reversed(ring):
+                            if ts <= frame_result.timestamp:
+                                alert_frame = f
+                                break
+                    if alert_frame is None:
+                        alert_frame = cached_frame
+                    await _process_and_save_alerts(frame_result, alert_frame, minio_store, mongo_store, rule_engine)
 
-                    alerts = rule_engine.process(frame_result)
-                    snapshot_path = None
-                    clip_path = None
-                    for alert in alerts:
-                        if snapshot_path is None and cached_frame is not None:
-                            snapshot_path = save_alert_snapshot(processed_frame, alert, minio_store)
-                        if clip_path is None and cached_frame is not None:
-                            clip_path = save_alert_clip(processed_frame, alert, minio_store)
-                        alert_data = alert.model_dump()
-                        if snapshot_path is not None:
-                            alert_data["snapshot_path"] = snapshot_path
-                        if clip_path is not None:
-                            alert_data["clip_path"] = clip_path
-                        alert_id = await asyncio.to_thread(mongo_store.insert_alert, alert_data)
-                        logger.info(
-                            f"ALERT: camera={alert.camera_id} alert_type={alert.alert_type} "
-                            f"confidence={alert.confidence} alert_id={alert_id} snapshot={snapshot_path} clip={clip_path}"
-                        )
-                    frame_cache.pop(frame_result.frame_id, None)
-
+            # Check aggregator timeouts once per frame packet (not per pipeline result).
             timed_out_results = aggregator.check_timeouts()
             for frame_result in timed_out_results:
-                frame = frame_cache.pop(frame_result.frame_id, None)
-                if frame is not None:
-                    processed_frame = _annotate_processed_frame(frame, frame_result)
-                    try:
-                        frame_buffer.put(camera.camera_id, processed_frame)
-                    except Exception:
-                        pass
-
-                alerts = rule_engine.process(frame_result)
-                snapshot_path = None
-                clip_path = None
-                for alert in alerts:
-                    if frame is not None and snapshot_path is None:
-                        snapshot_path = save_alert_snapshot(processed_frame, alert, minio_store)
-                    if frame is not None and clip_path is None:
-                        clip_path = save_alert_clip(processed_frame, alert, minio_store)
-                    alert_data = alert.model_dump()
-                    if snapshot_path is not None:
-                        alert_data["snapshot_path"] = snapshot_path
-                    if clip_path is not None:
-                        alert_data["clip_path"] = clip_path
-                    alert_id = await asyncio.to_thread(mongo_store.insert_alert, alert_data)
-                    logger.info(
-                        f"ALERT-TIMEOUT: camera={alert.camera_id} alert_type={alert.alert_type} "
-                        f"confidence={alert.confidence} alert_id={alert_id} snapshot={snapshot_path} clip={clip_path}"
-                    )
+                alert_frame = None
+                ring = camera_ring_buffers.get(frame_result.camera_id)
+                if ring:
+                    for ts, f in reversed(ring):
+                        if ts <= frame_result.timestamp: 
+                            alert_frame = f
+                            break
+                await _process_and_save_alerts(frame_result, alert_frame, minio_store, mongo_store, rule_engine, is_timeout=True)
         finally:
             queue.task_done()
 
@@ -379,24 +389,36 @@ async def main() -> None:
     parser.add_argument("--enable_livekit", action="store_true", help="Enable publishing streams to LiveKit")
     args = parser.parse_args()
 
-    mongo_store = MongoAlertStore()
+    app_settings = _settings
+    mongo_store = MongoAlertStore(app_settings.mongo)
     camera_data = mongo_store.get_cameras_by_ids([(args.tenant_id, cid) for cid in args.camera_ids])
 
-    cameras = [CameraConfig.model_validate(cam) for cam in camera_data]
+    cameras = []
+    for cam in camera_data:
+        try:
+            cameras.append(CameraConfig.model_validate(cam))
+        except ValidationError as e:
+            cam_id = cam.get("camera_id", "unknown")
+            logger.error(f"Validation failed for camera {cam_id}: {e}")
 
     if not cameras:
         logger.error(f"No enabled cameras found for tenant {args.tenant_id} and cameras {args.camera_ids}")
         return
 
-    pipeline_manager = PipelineManager()
+    required_pipelines = set()
+    for camera in cameras:
+        for p in camera.pipelines:
+            required_pipelines.add(p)
+
+    # Pipeline constructors load YOLO/MediaPipe models synchronously — offload
+    # to a worker thread so the event loop stays responsive during startup.
+    pipeline_manager = await asyncio.to_thread(PipelineManager, required_pipelines, app_settings)
     aggregator = FrameAggregator(timeout_ms=AGGREGATOR_TIMEOUT_MS)
     default_engine, per_camera_engines = load_rules()
-    app_settings = AppSettings()
-    minio_store = None
-    try:
-        minio_store = MinioSnapshotStore(app_settings.minio)
-    except Exception as exc:
-        logger.warning(f"MinIO unavailable, using local alert storage fallback: {exc}")
+    
+    # Initialize MinIO (fails if unavailable, no local fallback)
+    minio_store = MinioSnapshotStore(app_settings.minio)
+    
     livekit_publisher = None
 
     if getattr(args, "enable_livekit", False) and LiveKitPublisher is not None:
@@ -407,6 +429,7 @@ async def main() -> None:
             logger.error(f"Failed to start LiveKit publisher: {e}")
 
     logger.info(f"Available pipelines: {pipeline_manager.available_pipelines()}")
+    logger.info(f"Active pipelines initialized: {pipeline_manager.loaded_pipelines()}")
     logger.info(f"Enabled cameras: {[camera.camera_id for camera in cameras]}")
 
     tasks: list[asyncio.Task] = []

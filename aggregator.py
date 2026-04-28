@@ -34,7 +34,7 @@ class FrameAggregator:
 
         pending = self.pending[frame_id]
         pending.results[pipeline_result.pipeline_id] = pipeline_result
-
+####
         if len(pending.results) >= pending.expected_pipelines:
             del self.pending[frame_id]
             return FrameResult(
