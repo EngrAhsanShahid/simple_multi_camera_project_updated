@@ -33,7 +33,7 @@ class MongoSettings(BaseModel):
     """MongoDB connection configuration."""
 
     uri: str = "mongodb://localhost:27017"
-    database: str = "nexa_security"
+    database: str = "nexa_simple"
 
 
 class MinioSettings(BaseModel):
