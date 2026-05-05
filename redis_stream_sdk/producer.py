@@ -35,10 +35,15 @@ class StreamProducer:
 
         return msg_id
     
-    async def get_results(self, request_id):
+    async def subscribe(self, request_id):
         pubsub = self.redis.pubsub()
+        await pubsub.subscribe(request_id)
+        return pubsub
+    
+    async def get_results(self, request_id, pubsub):
+        # pubsub = self.redis.pubsub()
         try:
-            await pubsub.subscribe(request_id)
+            # await pubsub.subscribe(request_id)
             async for message in pubsub.listen():
 
                 # skip internal subscribe confirmation messages
@@ -46,7 +51,7 @@ class StreamProducer:
                     continue
 
                 payload = msgpack.unpackb(message["data"], raw=False)
-                print(f"Received message on pubsub channel {request_id}: {payload}")
+                # print(f"Received message on pubsub channel {request_id}: {payload}")
                 return payload
         finally:
             try:

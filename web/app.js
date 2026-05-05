@@ -1,256 +1,254 @@
-// Simple LiveKit web UI (ES module)
-// Import the LiveKit ESM bundle directly from jsDelivr (pin to a known good version).
-// jsDelivr provides CORS headers for the ESM bundle.
-import { Room } from 'https://cdn.jsdelivr.net/npm/livekit-client@2.18.1/dist/livekit-client.esm.mjs';
+// Nexa LiveKit Multi-Camera Viewer
+// Subscribes to one tenant room and renders ALL published video tracks in a grid.
+// Each track tile is labelled by the publishing camera (track name = camera_id).
 
+import { Room, RoomEvent, Track } from 'https://cdn.jsdelivr.net/npm/livekit-client@2.18.1/dist/livekit-client.esm.mjs';
+
+// --- DOM refs ---
 const connectBtn = document.getElementById('connectBtn');
 const disconnectBtn = document.getElementById('disconnectBtn');
 const serverUrlInput = document.getElementById('serverUrl');
 const tenantIdInput = document.getElementById('tenantId');
 const viewerIdInput = document.getElementById('viewerId');
+const tokenInput = document.getElementById('tokenInput');
 const alertIdInput = document.getElementById('alertId');
 const openEvidenceBtn = document.getElementById('openEvidenceBtn');
 const evidenceUrlDiv = document.getElementById('evidenceUrl');
 const statusDiv = document.getElementById('status');
-const videosDiv = document.getElementById('videos');
-const tracksDiv = document.getElementById('tracks');
-const activeTrackDiv = document.getElementById('activeTrack');
+const grid = document.getElementById('grid');
+const emptyState = document.getElementById('empty');
 
+// --- State ---
 let room = null;
-let activeTrackKey = null;
-const trackEntries = new Map();
+// Key = `${participant.sid}:${publication.trackSid}`, Value = { tile, videoEl }
+const tiles = new Map();
 
 function setStatus(s) { statusDiv.textContent = s; }
+function setEvidenceText(t) { evidenceUrlDiv.textContent = t || ''; }
 
-function setEvidenceText(text) {
-  evidenceUrlDiv.textContent = text || '';
+function refreshEmptyState() {
+  emptyState.style.display = tiles.size === 0 ? '' : 'none';
 }
 
-function setActiveTrackLabel(label) {
-  activeTrackDiv.textContent = label || 'None';
+function makeTrackKey(participant, publication) {
+  return `${participant?.sid || 'unknown'}:${publication?.trackSid || publication?.sid || 'track'}`;
 }
 
-function toParticipantList(collection) {
-  if (!collection) return [];
-  if (typeof collection.values === 'function') {
-    return Array.from(collection.values());
+function makeTrackLabel(publication, participant) {
+  const cameraId = publication?.trackName || 'unknown_camera';
+  const identity = participant?.identity || 'unknown_publisher';
+  return { cameraId, identity };
+}
+
+// --- Tile creation / removal ---
+
+function addTrack(track, publication, participant) {
+  if (track.kind !== Track.Kind.Video) return;
+
+  const key = makeTrackKey(participant, publication);
+  if (tiles.has(key)) return;  // already attached
+
+  const { cameraId, identity } = makeTrackLabel(publication, participant);
+
+  const tile = document.createElement('div');
+  tile.className = 'tile';
+
+  const labelEl = document.createElement('div');
+  labelEl.className = 'tile-label';
+  labelEl.textContent = cameraId;
+  tile.appendChild(labelEl);
+
+  const videoEl = track.attach();
+  videoEl.autoplay = true;
+  videoEl.playsInline = true;
+  videoEl.muted = true;
+  tile.appendChild(videoEl);
+
+  const metaEl = document.createElement('div');
+  metaEl.className = 'tile-meta';
+  metaEl.textContent = `participant: ${identity}`;
+  tile.appendChild(metaEl);
+
+  grid.appendChild(tile);
+  tiles.set(key, { tile, videoEl, track });
+  refreshEmptyState();
+}
+
+function removeTrack(track, publication, participant) {
+  const key = makeTrackKey(participant, publication);
+  const entry = tiles.get(key);
+  if (!entry) return;
+
+  try { entry.track?.detach(); } catch (e) { /* ignore */ }
+  entry.tile.remove();
+  tiles.delete(key);
+  refreshEmptyState();
+}
+
+function removeAllTracksForParticipant(participantSid) {
+  const toRemove = [];
+  for (const [key, entry] of tiles.entries()) {
+    if (key.startsWith(`${participantSid}:`)) {
+      toRemove.push({ key, entry });
+    }
   }
-  if (Array.isArray(collection)) {
-    return collection;
+  for (const { key, entry } of toRemove) {
+    try { entry.track?.detach(); } catch (e) { /* ignore */ }
+    entry.tile.remove();
+    tiles.delete(key);
   }
-  return [];
+  refreshEmptyState();
 }
 
-function makeTrackKey(track, publication, participant) {
-  return publication?.trackSid || publication?.sid || track?.sid || `${getParticipantSid(participant, publication)}:${publication?.trackName || track?.name || 'track'}`;
-}
-
-function makeTrackLabel(track, publication, participant) {
-  const participantLabel = participant?.identity || getParticipantSid(participant, publication);
-  const trackLabel = publication?.trackName || track?.name || publication?.kind || 'track';
-  return `${participantLabel} / ${trackLabel}`;
-}
-
-function renderTrackButtons() {
-  tracksDiv.innerHTML = '';
-  for (const [key, entry] of trackEntries.entries()) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = entry.label;
-    button.style.padding = '6px 10px';
-    button.style.border = key === activeTrackKey ? '2px solid #111' : '1px solid #bbb';
-    button.style.background = key === activeTrackKey ? '#111' : '#fff';
-    button.style.color = key === activeTrackKey ? '#fff' : '#111';
-    button.addEventListener('click', () => selectTrack(key));
-    tracksDiv.appendChild(button);
+function clearAllTiles() {
+  for (const entry of tiles.values()) {
+    try { entry.track?.detach(); } catch (e) { /* ignore */ }
+    entry.tile.remove();
   }
+  tiles.clear();
+  refreshEmptyState();
 }
 
-function selectTrack(trackKey) {
-  activeTrackKey = trackKey;
-  for (const [key, entry] of trackEntries.entries()) {
-    entry.el.style.display = key === trackKey ? '' : 'none';
-  }
-  setActiveTrackLabel(trackEntries.get(trackKey)?.label || 'None');
-  renderTrackButtons();
-}
+// --- Token fetching ---
 
 async function getToken(tenantId, viewerId) {
+  // 1) If user pasted a token, use it directly.
+  const pasted = tokenInput.value.trim();
+  if (pasted) return pasted;
+
+  // 2) Otherwise try the backend endpoint (may not exist in this deployment).
   const resp = await fetch('/api/v1/livekit/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ tenant_id: tenantId, viewer_id: viewerId || 'viewer' }),
   });
-  if (!resp.ok) throw new Error('Token request failed: ' + resp.statusText);
+  if (!resp.ok) {
+    throw new Error(`Token endpoint not reachable (${resp.status}). Paste a subscriber token manually.`);
+  }
   const data = await resp.json();
   return data.token;
 }
 
-function attachTrack(track, publication, participant) {
-  try {
-    const el = track.attach();
-    const participantSid = getParticipantSid(participant, publication);
-    const key = makeTrackKey(track, publication, participant);
-    el.dataset.participant = participantSid;
-    el.dataset.trackKey = key;
-    el.dataset.trackName = publication?.trackName || track?.name || 'track';
-    el.autoplay = true;
-    el.playsInline = true;
-    videosDiv.appendChild(el);
-
-    const label = makeTrackLabel(track, publication, participant);
-    trackEntries.set(key, { el, participantSid, label });
-    if (!activeTrackKey) {
-      selectTrack(key);
-    } else {
-      el.style.display = key === activeTrackKey ? '' : 'none';
-      renderTrackButtons();
-    }
-  } catch (e) {
-    console.warn('attach error', e);
-  }
-}
-
-function getParticipantSid(participant, publication) {
-  return participant?.sid || publication?.participant?.sid || publication?.participantSid || 'unknown';
-}
-
-function detachParticipant(participantSid) {
-  const removedKeys = [];
-  for (const [key, entry] of trackEntries.entries()) {
-    if (entry.participantSid === participantSid) {
-      entry.el.remove();
-      trackEntries.delete(key);
-      removedKeys.push(key);
-    }
-  }
-  if (removedKeys.length > 0 && removedKeys.includes(activeTrackKey)) {
-    const nextKey = trackEntries.keys().next().value || null;
-    activeTrackKey = null;
-    if (nextKey) {
-      selectTrack(nextKey);
-    } else {
-      setActiveTrackLabel('None');
-      renderTrackButtons();
-    }
-  }
-}
-
-async function openAlertEvidence() {
-  const alertId = alertIdInput.value.trim();
-  if (!alertId) {
-    setStatus('Enter an alert id first');
-    return;
-  }
-
-  setStatus('Loading alert evidence...');
-  setEvidenceText('');
-
-  try {
-    const resp = await fetch(`/api/v1/alerts/${encodeURIComponent(alertId)}/evidence?expires_minutes=60`);
-    if (!resp.ok) {
-      throw new Error(`Evidence request failed: ${resp.status} ${resp.statusText}`);
-    }
-
-    const data = await resp.json();
-    const links = [];
-
-    if (data.snapshot_url) {
-      window.open(data.snapshot_url, '_blank', 'noopener,noreferrer');
-      links.push(`snapshot: ${data.snapshot_url}`);
-    }
-
-    if (data.clip_url) {
-      window.open(data.clip_url, '_blank', 'noopener,noreferrer');
-      links.push(`clip: ${data.clip_url}`);
-    }
-
-    if (links.length === 0) {
-      setStatus('Alert found, but no evidence URLs are stored');
-      setEvidenceText('No snapshot or clip URL available for this alert');
-      return;
-    }
-
-    setStatus(`Opened evidence for alert ${alertId}`);
-    setEvidenceText(links.join(' | '));
-  } catch (e) {
-    setStatus(`Evidence load failed: ${e.message}`);
-    setEvidenceText('');
-  }
-}
-
-function handleParticipant(participant) {
-  // subscribe to existing subscribed tracks
-  toParticipantList(participant.tracks).forEach(pub => {
-    if (pub.isSubscribed && pub.track) {
-      attachTrack(pub.track, pub, participant);
-    }
-  });
-
-  participant.on('trackSubscribed', (track, publication) => {
-    attachTrack(track, publication, participant);
-  });
-
-  participant.on('trackUnsubscribed', (track, publication) => {
-    // remove elements for this participant
-    detachParticipant(getParticipantSid(participant, publication));
-  });
-}
+// --- Room lifecycle ---
 
 connectBtn.addEventListener('click', async () => {
-  const url = serverUrlInput.value;
+  const url = serverUrlInput.value.trim();
   const tenant = tenantIdInput.value.trim();
   const viewer = viewerIdInput.value.trim() || 'viewer';
+
+  if (!url || !tenant) {
+    setStatus('Please fill server url and tenant id.');
+    return;
+  }
 
   setStatus('Requesting token...');
   let token;
   try {
     token = await getToken(tenant, viewer);
   } catch (e) {
-    setStatus('Token request failed: ' + e.message);
+    setStatus('Token error: ' + e.message);
     return;
   }
 
-  setStatus('Connecting to LiveKit...');
+  setStatus(`Connecting to ${url} as ${viewer}...`);
   try {
-    room = new Room();
+    room = new Room({ adaptiveStream: true, dynacast: true });
 
-    room.on('participantConnected', p => handleParticipant(p));
-    room.on('participantDisconnected', p => detachParticipant(getParticipantSid(p)));
-    room.on('trackSubscribed', (track, publication, participant) => {
-      attachTrack(track, publication, participant);
+    // Subscribe events for already-publishing participants and new arrivals.
+    room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+      addTrack(track, publication, participant);
     });
-    room.on('trackUnsubscribed', (track, publication, participant) => {
-      detachParticipant(getParticipantSid(participant, publication));
+
+    room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+      removeTrack(track, publication, participant);
     });
-    room.on('disconnected', () => {
+
+    room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+      removeAllTracksForParticipant(participant.sid);
+    });
+
+    room.on(RoomEvent.Disconnected, () => {
       setStatus('Disconnected');
+      clearAllTiles();
       disconnectBtn.disabled = true;
       connectBtn.disabled = false;
     });
 
     await room.connect(url, token);
-    setStatus('Connected: ' + (room.localParticipant ? room.localParticipant.identity : 'local'));
 
-    // existing participants
-    toParticipantList(room.remoteParticipants || room.participants).forEach(handleParticipant);
-
+    setStatus(`Connected to room "${room.name}" as ${room.localParticipant?.identity || viewer}.`);
     disconnectBtn.disabled = false;
     connectBtn.disabled = true;
+
+    // Attach any tracks already published before we joined.
+    for (const participant of room.remoteParticipants.values()) {
+      for (const publication of participant.trackPublications.values()) {
+        if (publication.isSubscribed && publication.track) {
+          addTrack(publication.track, publication, participant);
+        }
+      }
+    }
   } catch (e) {
     console.error(e);
-    setStatus('Connection failed: ' + e);
+    setStatus('Connection failed: ' + (e?.message || e));
+    if (room) {
+      try { await room.disconnect(); } catch (_) { /* ignore */ }
+      room = null;
+    }
   }
 });
 
-disconnectBtn.addEventListener('click', () => {
+disconnectBtn.addEventListener('click', async () => {
   if (room) {
-    room.disconnect();
+    try { await room.disconnect(); } catch (_) { /* ignore */ }
     room = null;
-    setStatus('Disconnected');
-    disconnectBtn.disabled = true;
-    connectBtn.disabled = false;
   }
+  clearAllTiles();
+  setStatus('Disconnected');
+  disconnectBtn.disabled = true;
+  connectBtn.disabled = false;
 });
+
+// --- Alert evidence (best-effort; backend may not exist) ---
+
+async function openAlertEvidence() {
+  const alertId = alertIdInput.value.trim();
+  if (!alertId) {
+    setStatus('Enter an alert id first.');
+    return;
+  }
+
+  setStatus(`Loading evidence for ${alertId}...`);
+  setEvidenceText('');
+
+  try {
+    const resp = await fetch(`/api/v1/alerts/${encodeURIComponent(alertId)}/evidence?expires_minutes=60`);
+    if (!resp.ok) {
+      throw new Error(`Evidence endpoint not reachable (${resp.status}).`);
+    }
+    const data = await resp.json();
+    const links = [];
+    if (data.snapshot_url) {
+      window.open(data.snapshot_url, '_blank', 'noopener,noreferrer');
+      links.push(`snapshot: ${data.snapshot_url}`);
+    }
+    if (data.clip_url) {
+      window.open(data.clip_url, '_blank', 'noopener,noreferrer');
+      links.push(`clip: ${data.clip_url}`);
+    }
+    if (links.length === 0) {
+      setStatus('Alert found, but no evidence URLs are stored.');
+      setEvidenceText('No snapshot or clip URL available.');
+      return;
+    }
+    setStatus(`Opened evidence for ${alertId}.`);
+    setEvidenceText(links.join(' | '));
+  } catch (e) {
+    setStatus(`Evidence load failed: ${e.message}`);
+    setEvidenceText('Tip: this needs a backend at /api/v1/alerts/<alert_id>/evidence. Open MinIO directly if no backend.');
+  }
+}
 
 openEvidenceBtn.addEventListener('click', openAlertEvidence);
+
+refreshEmptyState();

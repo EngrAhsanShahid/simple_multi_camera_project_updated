@@ -1,8 +1,5 @@
 {
     "pipeline_id": "ppe",
-    "model_path": "pipelines/ppe/models/best.pt",
-    "confidence_threshold": 0.5,
-    "max_detections": 50,
-    "device": "cuda",
-    "result_timeout_sec": 0.900
+    "result_timeout_sec": 0.9,
+    "profile": false
 }

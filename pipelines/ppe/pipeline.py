@@ -16,8 +16,7 @@ Depends On:
     - shared.utils.logging
 
 Used By:
-    - apps/pipeline_runner/process_manager.py
-    - tests/test_ppe_pipeline.py
+    - pipeline_manager.py (loaded dynamically via build())
 """
 
 import asyncio
@@ -27,9 +26,10 @@ from pathlib import Path
 
 
 from pipelines.base_pipeline import BasePipeline
-from shared.contracts.frame_packet import FramePacket
-from shared.contracts.pipeline_result import Detection, PipelineResult
-from shared.utils.logging import get_logger
+from contracts.frame_packet import FramePacket
+from contracts.pipeline_result import Detection, PipelineResult
+from utils.logging import get_logger
+from core.dynamic_cache import FrameSimilarCache
 
 from redis_stream_sdk.client import RedisClient
 from redis_stream_sdk.producer import StreamProducer
@@ -40,6 +40,12 @@ VIOLATION_CLASS_IDS = {2, 3, 4}  # NO-Hardhat, NO-Mask, NO-Safety Vest
 
 # Default config file path
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.json"
+
+
+def build(app_settings) -> "PPEPipeline":
+    config = load_pipeline_config()
+    config.setdefault("redis_url", app_settings.redis.url)
+    return PPEPipeline(config)
 
 
 def load_pipeline_config(config_path: Path | str | None = None) -> dict:
@@ -69,6 +75,7 @@ class PPEPipeline(BasePipeline):
     def __init__(self, config: dict) -> None:
         self._pipeline_id: str = config.get("pipeline_id", "ppe")
         self._logger = get_logger("ppe_pipeline", pipeline_id=self._pipeline_id)
+        self._profile: bool = bool(config.get("profile", False))
 
         self._logger.info("ppe pipeline_initialized")
 
@@ -82,7 +89,8 @@ class PPEPipeline(BasePipeline):
         self.client: RedisClient | None = None
         self.redis = None
         self.producer: StreamProducer | None = None
-
+        # self.cache = FrameCache(max_cache_size=5)  # Optional in-memory cache for frames
+        self.cache = FrameSimilarCache(max_cache_size=5,diff_threshold=0.5,hash_threshold=2)  # Optional in-memory cache for frames
         self._initialized = False
 
     async def setup(self) -> None:
@@ -128,18 +136,28 @@ class PPEPipeline(BasePipeline):
         if not self._initialized:
             await self.setup()
         start = time.monotonic()
-
+        result = self.cache.get(frame=frame_packet.frame)
+        if result:
+            # self._logger.info("ppe cache HIT!!")
+            return result
         try:
+            # self._logger.info("ppe cache MISS")
             request_id = str(uuid.uuid4())
+            pubsub = await self.producer.subscribe(request_id=request_id)
+
+            t_put = time.monotonic()
             await self.producer.publish_frame(
                 stream_name="ppe",
                 request_id=request_id,
                 frame=frame_packet.frame,
                 maxlen=20000,
             )
+            put_ms = (time.monotonic() - t_put) * 1000.0
+
+            t_get = time.monotonic()
             try:
                 results = await asyncio.wait_for(
-                    self.producer.get_results(request_id),
+                    self.producer.get_results(request_id, pubsub=pubsub),
                     timeout=self._result_timeout_sec,
                 )
             except asyncio.TimeoutError:
@@ -149,6 +167,7 @@ class PPEPipeline(BasePipeline):
                     timeout_sec=self._result_timeout_sec,
                 )
                 results = {}
+            get_ms = (time.monotonic() - t_get) * 1000.0
 
             # Extract detections from first result
             detections: list[Detection] = []
@@ -180,10 +199,20 @@ class PPEPipeline(BasePipeline):
         except Exception as exc:
             self._logger.error("inference_failed", error=str(exc))
             detections = []
+            put_ms = get_ms = 0.0
 
         elapsed_ms = (time.monotonic() - start) * 1000.0
 
-        return PipelineResult(
+        if self._profile:
+            self._logger.info(
+                "ppe_profile",
+                frame_id=frame_packet.frame_id,
+                redis_put_ms=round(put_ms, 2),
+                redis_get_ms=round(get_ms, 2),
+                total_ms=round(elapsed_ms, 2),
+            )
+
+        result = PipelineResult(
             tenant_id=frame_packet.tenant_id,
             camera_id=frame_packet.camera_id,
             frame_id=frame_packet.frame_id,
@@ -192,3 +221,5 @@ class PPEPipeline(BasePipeline):
             detections=detections,
             inference_time_ms=round(elapsed_ms, 2),
         )
+        self.cache.set(frame=frame_packet.frame,inference_result=result)
+        return result

@@ -10,8 +10,8 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from pipelines.ppe.pipeline import PPEPipeline, load_pipeline_config
-from shared.contracts.frame_packet import FramePacket
-from shared.contracts.pipeline_result import PipelineResult, Detection
+from contracts.frame_packet import FramePacket
+from contracts.pipeline_result import PipelineResult, Detection
 
 async def _process_raw_to_result(pipeline, raw_results, packet: FramePacket, start_time: float) -> PipelineResult:
     detections: list[Detection] = []
@@ -69,7 +69,7 @@ async def main():
     
     print("\nStarting inference profiling loop...")
     
-    num_iterations = 600
+    num_iterations = 60
     latencies = []
     
     cap = cv2.VideoCapture(str(video_path))

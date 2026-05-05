@@ -1,0 +1,16 @@
+# Minimal config for local dev on Windows (native binary).
+# --dev flag handles TURN relay and key generation.
+#
+# Windows quirk: LiveKit binds UDP per-interface, NOT on 127.0.0.1.
+# node_ip must match an interface where UDP is actually bound.
+# tcp_port provides ICE-TCP fallback (TCP binds on 0.0.0.0).
+# If your LAN IP changes, update node_ip accordingly.
+keys:
+  devkey: dummy-key-for-dev
+rtc:
+  node_ip: 192.168.100.14
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+logging:
+  level: info

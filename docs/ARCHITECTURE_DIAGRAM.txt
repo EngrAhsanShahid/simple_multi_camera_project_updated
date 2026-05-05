@@ -1,43 +1,81 @@
-Multi-Camera Processing Architecture
+Single-Camera Worker — Architecture (ASCII)
 
-                +-------------------------------+
-                |         camera.json           |
-                |  (all camera configurations) |
-                +---------------+---------------+
+                +---------------------------------+
+                |  MongoDB: cameras collection    |
+                | (CameraConfig per tenant+cam_id)|
+                +---------------+-----------------+
+                                |
+                                v   loaded once at startup by main.py
+                +---------------------------------+
+                |             main.py             |
+                |  --tenant_id  --camera_id       |
+                |  [--enable_livekit]             |
+                +---------------+-----------------+
                                 |
                                 v
-                +-------------------------------+
-                |            main.py            |
-                |       starts all tasks        |
-                +---------------+---------------+
+                +---------------------------------+
+                |        PipelineManager          |
+                |  loads ONLY camera.pipelines    |
+                |  via dynamic build(app_settings)|
+                +---------------+-----------------+
                                 |
-        +-----------------------+------------------------+
-        |                       |                        |
-        v                       v                        v
- +--------------+       +--------------+        +--------------+
- | Camera 1     |       | Camera 2     |  ...   | Camera N     |
- +------+-------+       +------+-------+        +------+-------+
-        |                      |                         |
-        v                      v                         v
- +--------------------------------------------------------------+
- |               camera_reader_task   (LOOP 1)                  |
- |  SourceReader -> FrameSampler -> FramePacket -> put_latest   |
- +------------------------------+-------------------------------+
-                                |
-                                v
-                     +-------------------------+
-                     |  Async Queue (size 10)  |
-                     | latest frames only kept |
-                     +------------+------------+
-                                  |
-                                  v
- +--------------------------------------------------------------+
- |                 processor_task   (LOOP 2)                    |
- | queue.get() -> PipelineManager -> Aggregator -> AlertEngine |
- +------------------------------+-------------------------------+
-                                |
-                                v
-                     +-------------------------+
-                     |      mongo_store.py     |
-                     | save alert with alert_id|
-                     +-------------------------+
+        +-----------------------+-------------------------+
+        |                                                 |
+        v                                                 v
++--------------------+                          +-----------------------+
+| camera_reader_task |                          |    processor_task     |
++--------------------+                          +-----------------------+
+| SourceReader       |                          | queue.get()           |
+|  (RTSP / file)     |                          |   |                   |
+| FrameSampler       |                          |   v                   |
+|  (target_fps)      |                          | run_pipelines()       |
+| build FramePacket  |                          |  asyncio.wait(timeout)|
+|  frame_id={t}_{c}_*|                          |  cancels stragglers   |
+| put_latest(queue)  |                          |   |                   |
++----+--------+------+                          |   v                   |
+     |        |                                 | build FrameResult     |
+     |        |  raw frame copy (every frame)   |   |                   |
+     |        +------------> camera_ring_buffers|   v                   |
+     |                       (deque maxlen=     | rule_engine.process() |
+     |                        before+after+1)   |  per-rule cooldown    |
+     |                                          |  per-rule draw flag   |
+     |  sampled FramePacket only                |   |                   |
+     v                                          |   v                   |
++-----------------+                             |  alerts? ----no----+  |
+| asyncio.Queue   |                             |   |                |  |
+|  maxsize=N      | <---------------------------+   |yes             |  |
+|  put_latest:    |                                 v                |  |
+|  drop oldest if |                       +-----------------------+  |  |
+|  full + WARN log|                       | save_alert_snapshot   |  |  |
++-----------------+                       |  to MinIO (threaded)  |  |  |
+                                          +-----------------------+  |  |
+                                                     |               |  |
+                                                     v               |  |
+                                          +-----------------------+  |  |
+                                          | save_alert_clip       |  |  |
+                                          |  daemon thread reads  |  |  |
+                                          |  ring buffer post-    |  |  |
+                                          |  delay, writes WebM,  |  |  |
+                                          |  uploads to MinIO     |  |  |
+                                          +-----------------------+  |  |
+                                                     |               |  |
+                                                     v               |  |
+                                          +-----------------------+  |  |
+                                          | mongo_store           |  |  |
+                                          |  insert AlertEvent    |  |  |
+                                          |  alert_id={t}_{c}_*   |  |  |
+                                          +-----------------------+  |  |
+                                                                     |  |
+                                          +-----------------------+  |  |
+                                          | LiveKit (optional)    |<-+--+
+                                          |  if --enable_livekit: |
+                                          |   annotated frame on  |
+                                          |   alert, raw frame    |
+                                          |   otherwise → put to  |
+                                          |   frame_buffer        |
+                                          +-----------------------+
+
+PPE pipeline detail:
+  process(frame) -> publish to Redis stream "ppe" -> wait for result_timeout_sec
+  -> remote GPU cluster consumes, runs YOLO, publishes back -> get_results
+  -> on timeout: empty PipelineResult, logged as ppe_result_timeout

@@ -1,6 +1,4 @@
 {
-    "camera_id": "cam_01",
-    "cooldown_sec": 30.0,
     "rules": [
         {
             "type": "threshold",
@@ -8,7 +6,9 @@
             "label": "NO-Hardhat",
             "confidence_threshold": 0.8,
             "alert_type": "ppe_violation",
-            "severity": "HIGH"
+            "severity": "HIGH",
+            "cooldown_sec": 30.0,
+            "draw": true
         },
         {
             "type": "threshold",
@@ -16,7 +16,9 @@
             "label": "NO-Mask",
             "confidence_threshold": 0.8,
             "alert_type": "ppe_violation",
-            "severity": "MEDIUM"
+            "severity": "MEDIUM",
+            "cooldown_sec": 30.0,
+            "draw": true
         },
         {
             "type": "threshold",
@@ -24,7 +26,32 @@
             "label": "NO-Safety Vest",
             "confidence_threshold": 0.8,
             "alert_type": "ppe_violation",
-            "severity": "HIGH"
+            "severity": "HIGH",
+            "cooldown_sec": 30.0,
+            "draw": true
+        },
+        {
+            "type": "sustained",
+            "pipeline_id": "ppe",
+            "label": "NO-gloves",
+            "confidence_threshold": 0.7,
+            "required_consecutive_frames": 5,
+            "alert_type": "ppe_sustained_violation",
+            "severity": "CRITICAL",
+            "cooldown_sec": 60.0,
+            "draw": true
+        },
+        {
+            "type": "window",
+            "pipeline_id": "ppe",
+            "label": "NO-glasses",
+            "confidence_threshold": 0.7,
+            "window_size": 10,
+            "min_detections": 6,
+            "alert_type": "ppe_persistent_violation",
+            "severity": "HIGH",
+            "cooldown_sec": 45.0,
+            "draw": false
         }
     ]
 }

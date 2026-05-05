@@ -1,5 +1,4 @@
 {
-    "cooldown_sec": 30.0,
     "rules": [
         {
             "type": "threshold",
@@ -7,7 +6,9 @@
             "label": "NO-Hardhat",
             "confidence_threshold": 0.8,
             "alert_type": "ppe_violation",
-            "severity": "HIGH"
+            "severity": "HIGH",
+            "cooldown_sec": 3.0,
+            "draw": true
         },
         {
             "type": "threshold",
@@ -15,7 +16,9 @@
             "label": "NO-Mask",
             "confidence_threshold": 0.8,
             "alert_type": "ppe_violation",
-            "severity": "MEDIUM"
+            "severity": "MEDIUM",
+            "cooldown_sec": 3.0,
+            "draw": true
         },
         {
             "type": "threshold",
@@ -23,7 +26,9 @@
             "label": "NO-Safety Vest",
             "confidence_threshold": 0.8,
             "alert_type": "ppe_violation",
-            "severity": "HIGH"
+            "severity": "HIGH",
+            "cooldown_sec": 3.0,
+            "draw": true
         }
     ]
 }
