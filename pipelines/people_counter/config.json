@@ -1,8 +1,0 @@
-{
-    "pipeline_id": "people_counter",
-    "model_path": "pipelines/people_counter/models/yolo26n.pt",
-    "confidence_threshold": 0.5,
-    "max_detections": 100,
-    "device": "cpu",
-    "person_class_id": 0
-}
